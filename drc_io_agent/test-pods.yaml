@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-high-priority
+  namespace: default
+  labels:
+    group-id: hp
+    app: test-workload
+spec:
+  containers:
+  - name: workload
+    image: busybox:latest
+    command: ["sh", "-c", "while true; do dd if=/dev/zero of=/mnt/features/test-hp bs=1M count=100 2>/dev/null; sleep 5; done"]
+    volumeMounts:
+    - name: features
+      mountPath: /mnt/features
+  volumes:
+  - name: features
+    hostPath:
+      path: /mnt/features
+      type: DirectoryOrCreate
+  restartPolicy: Always
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-low-priority-1
+  namespace: default
+  labels:
+    group-id: lp
+    app: test-workload
+spec:
+  containers:
+  - name: workload
+    image: busybox:latest
+    command: ["sh", "-c", "while true; do dd if=/dev/zero of=/mnt/features/test-lp1 bs=1M count=100 2>/dev/null; sleep 5; done"]
+    volumeMounts:
+    - name: features
+      mountPath: /mnt/features
+  volumes:
+  - name: features
+    hostPath:
+      path: /mnt/features
+      type: DirectoryOrCreate
+  restartPolicy: Always
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-low-priority-2
+  namespace: default
+  labels:
+    group-id: lp
+    app: test-workload
+spec:
+  containers:
+  - name: workload
+    image: busybox:latest
+    command: ["sh", "-c", "while true; do dd if=/mnt/features/test-lp1 of=/dev/null bs=1M 2>/dev/null; sleep 5; done"]
+    volumeMounts:
+    - name: features
+      mountPath: /mnt/features
+  volumes:
+  - name: features
+    hostPath:
+      path: /mnt/features
+      type: DirectoryOrCreate
+  restartPolicy: Always
+
