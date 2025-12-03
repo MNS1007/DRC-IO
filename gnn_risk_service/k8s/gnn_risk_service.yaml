@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gnn-risk-service
+  labels:
+    app: gnn-risk-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gnn-risk-service
+  template:
+    metadata:
+      labels:
+        app: gnn-risk-service
+        group-id: hp   # High-priority workload for DRC-IO
+    spec:
+      containers:
+        - name: gnn-risk-service
+          image: sanpr03/gnn-risk-service:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: FEATURES_PATH
+              value: /mnt/features/features.csv
+            - name: EDGES_PATH
+              value: /mnt/features/edges.csv
+            - name: MODEL_PATH
+              value: /mnt/features/model.pt
+            - name: SLA_MS
+              value: "500"
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: features-volume
+              mountPath: /mnt/features
+      volumes:
+        - name: features-volume
+          persistentVolumeClaim:
+            claimName: risk-features-pvc  # Track 2 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gnn-risk-service
+  labels:
+    app: gnn-risk-service
+spec:
+  type: ClusterIP
+  selector:
+    app: gnn-risk-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
