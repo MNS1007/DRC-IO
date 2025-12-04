@@ -18,6 +18,27 @@ The agent runs as a DaemonSet, ensuring one instance per worker node. It:
 - Discovers cgroup paths for low priority containers
 - Applies read/write bandwidth limits to prevent interference with high priority workloads
 
+## Setting Up AWS Credentials
+
+Before deploying, you need to configure AWS credentials. We recommend using a `.env` file:
+
+1. **Copy the example:**
+   ```bash
+   cp env.example ../.env
+   ```
+
+2. **Edit `.env` with your credentials from AWS Access Portal:**
+   ```bash
+   nano ../.env
+   ```
+
+3. **Load credentials:**
+   ```bash
+   ./load-aws-env.sh
+   ```
+
+See [ENV-FILE-SETUP.md](ENV-FILE-SETUP.md) for detailed instructions, or [AWS-CREDENTIALS-SETUP.md](AWS-CREDENTIALS-SETUP.md) for manual setup.
+
 ## Building
 
 ### Local Build
@@ -33,11 +54,7 @@ See [aws-setup.md](aws-setup.md) for detailed AWS EKS setup instructions.
 
 Quick start:
 ```bash
-# Set variables
-export AWS_REGION=us-west-2
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
-# Build and push to ECR
+# Credentials from .env file are loaded automatically
 ./test-aws.sh  # This script builds, pushes, and deploys
 ```
 

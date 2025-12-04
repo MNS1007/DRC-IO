@@ -1,0 +1,54 @@
+# AWS Credentials and Environment Variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# AWS credentials (never commit these)
+.aws/
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Kubernetes
+*.kubeconfig
+kubeconfig*
+
+# Docker
+docker-compose.override.yml
+

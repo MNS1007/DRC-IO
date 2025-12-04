@@ -17,6 +17,17 @@ NAMESPACE="${NAMESPACE:-default}"
 
 echo -e "${GREEN}=== DRC I/O Agent AWS Test Script ===${NC}\n"
 
+# Load AWS credentials from .env file if it exists
+if [ -f "../.env" ]; then
+    echo "Loading AWS credentials from ../.env..."
+    export $(grep -v '^#' ../.env | grep -v '^$' | xargs)
+    AWS_REGION="${AWS_DEFAULT_REGION:-$AWS_REGION}"
+elif [ -f ".env" ]; then
+    echo "Loading AWS credentials from .env..."
+    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+    AWS_REGION="${AWS_DEFAULT_REGION:-$AWS_REGION}"
+fi
+
 # Function to check if command exists
 check_command() {
     if ! command -v $1 &> /dev/null; then
