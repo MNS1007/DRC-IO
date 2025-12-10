@@ -9,7 +9,7 @@ kind: ClusterConfig
 metadata:
   name: drcio-demo
   region: us-east-1
-  version: "1.28"
+  version: "1.34"
 
 # Enable IAM OIDC provider for service accounts
 iam:
@@ -40,10 +40,11 @@ managedNodeGroups:
     volumeIOPS: 3000
     volumeThroughput: 125  # MB/s
 
-    # SSH access configuration
-    ssh:
-      allow: true
-      publicKeyPath: ~/.ssh/id_rsa.pub
+    # SSH access configuration (optional)
+    # Uncomment to enable SSH access to nodes
+    # ssh:
+    #   allow: true
+    #   publicKeyPath: ~/.ssh/id_rsa.pub
 
     # Labels for workload scheduling
     labels:
@@ -73,23 +74,13 @@ managedNodeGroups:
       ManagedBy: eksctl
       CostCenter: research
 
-    # Enable detailed monitoring
-    instanceMetadataOptions:
-      httpPutResponseHopLimit: 2
-      httpTokens: optional
-
     # Private networking (recommended for production)
     privateNetworking: false  # Set to true for production
 
-    # Security group configuration
-    securityGroups:
-      withShared: true
-      withLocal: true
-
-# Availability zones (automatically selected if not specified)
-availabilityZones:
-  - us-east-1a
-  - us-east-1b
+# Availability zones (eksctl will automatically select if not specified)
+# availabilityZones:
+#   - us-east-1a
+#   - us-east-1b
 
 # VPC configuration (eksctl will create a new VPC)
 vpc:
@@ -101,19 +92,13 @@ vpc:
     privateAccess: true
 
 # Add-ons configuration
+# Note: Default add-ons (vpc-cni, coredns, kube-proxy) are automatically installed
+# EBS CSI driver will be installed separately if needed
 addons:
   - name: vpc-cni
-    version: latest
     attachPolicyARNs:
       - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
 
   - name: coredns
-    version: latest
 
   - name: kube-proxy
-    version: latest
-
-  - name: aws-ebs-csi-driver
-    version: latest
-    wellKnownPolicies:
-      ebsCSIController: true

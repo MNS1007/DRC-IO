@@ -1,113 +1,31 @@
----
-# StorageClass for DRC-IO workloads
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: drcio-fast
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "false"
-provisioner: ebs.csi.aws.com
-volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: true
-parameters:
-  type: gp3
-  iops: "3000"
-  throughput: "125"
-  encrypted: "true"
-  fsType: ext4
-reclaimPolicy: Delete
-mountOptions:
-  - discard
-
----
-# StorageClass for batch workloads (lower performance, lower cost)
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: drcio-standard
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "false"
-provisioner: ebs.csi.aws.com
-volumeBindingMode: WaitForFirstConsumer
-allowVolumeExpansion: true
-parameters:
-  type: gp3
-  iops: "3000"
-  throughput: "125"
-  encrypted: "true"
-  fsType: ext4
-reclaimPolicy: Delete
-
----
-# PersistentVolumeClaim for high-priority service (example)
+# Persistent volume claim that both HP and LP workloads share for data access.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: hp-gnn-model-storage
-  namespace: default
+  name: shared-data
+  namespace: fraud-detection
   labels:
-    app: hp-gnn-service
-    priority: high
+    app: drcio
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: drcio-fast
+  storageClassName: gp3
   resources:
     requests:
       storage: 10Gi
 
 ---
-# PersistentVolumeClaim for batch processing (example)
-apiVersion: v1
-kind: PersistentVolumeClaim
+# gp3 StorageClass definition (install it only if the cluster doesn't already
+# provide one). Using AWS EBS CSI driver with encryption enabled.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
 metadata:
-  name: lp-batch-data-storage
-  namespace: default
-  labels:
-    app: lp-batch
-    priority: low
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: drcio-standard
-  resources:
-    requests:
-      storage: 20Gi
-
----
-# ConfigMap for shared configuration
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: drcio-config
-  namespace: default
-data:
-  # I/O weight configuration
-  io_weights.yaml: |
-    priorities:
-      high: 1000
-      medium: 100
-      low: 10
-
-  # Workload configuration
-  workload_config.yaml: |
-    high_priority:
-      - gnn-service
-      - inference-api
-    low_priority:
-      - batch-processing
-      - log-aggregation
-      - data-sync
-
----
-# Secret for application credentials (example)
-apiVersion: v1
-kind: Secret
-metadata:
-  name: drcio-secrets
-  namespace: default
-type: Opaque
-stringData:
-  # Add your secrets here
-  db-password: "changeme"
-  api-key: "your-api-key-here"
+  name: gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  iops: "3000"
+  throughput: "125"
+  encrypted: "true"
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true

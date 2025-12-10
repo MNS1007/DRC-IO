@@ -1,544 +1,442 @@
 #!/usr/bin/env python3
 """
-DRC-IO Controller - Dynamic Resource Control for I/O
+DRC-IO Controller: Dynamic Resource Controller for I/O
 
-This controller implements dynamic I/O prioritization in Kubernetes clusters.
-It monitors workload behavior and dynamically adjusts I/O scheduling parameters
-to ensure high-priority workloads receive guaranteed I/O resources while
-batch workloads are throttled as needed.
-
-Architecture:
-- Runs as a DaemonSet on each node
-- Monitors cgroup I/O metrics via sysfs
-- Applies I/O weights using cgroup v2 io.weight
-- Exposes Prometheus metrics for observability
-
-Workload Classification:
-- High Priority (HP): Real-time services (e.g., GNN inference)
-- Low Priority (LP): Batch jobs (e.g., data processing)
+This daemon protects latency-critical services by continuously monitoring
+their SLA metrics and dynamically adjusting the Linux cgroup io.weight
+values of co-located low-priority batch workloads.
 """
 
+import glob
+import logging
 import os
+import signal
 import sys
 import time
-import logging
-import signal
-import json
-from pathlib import Path
-from datetime import datetime
-from collections import defaultdict
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
-from kubernetes import client, config, watch
-import threading
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
-# Configure logging
+import requests
+from kubernetes import client, config
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+# -----------------------------------------------------------------------------
+# Logging setup
+# -----------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("drcio")
 
-# Prometheus metrics
-WORKLOAD_DISCOVERY = Counter(
-    'drcio_workload_discovery_total',
-    'Total workload discoveries',
-    ['workload_type', 'priority']
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+PROMETHEUS_URL = os.getenv(
+    "PROMETHEUS_URL",
+    "http://prometheus-kube-prometheus-prometheus.monitoring:9090",
+)
+SLA_THRESHOLD_MS = float(os.getenv("SLA_THRESHOLD_MS", "500"))
+CONTROL_LOOP_INTERVAL = int(os.getenv("CONTROL_LOOP_INTERVAL", "5"))
+K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "fraud-detection")
+METRICS_PORT = int(os.getenv("METRICS_PORT", "8080"))
+MIN_IO_WEIGHT = max(1, int(os.getenv("MIN_IO_WEIGHT", "100")))
+MAX_IO_WEIGHT = min(1000, int(os.getenv("MAX_IO_WEIGHT", "1000")))
+ADJUSTMENT_COOLDOWN = int(os.getenv("ADJUSTMENT_COOLDOWN", "10"))
+
+CGROUP_ROOT = "/sys/fs/cgroup"
+CGROUP_PATTERNS = [
+    "kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod{uid}.slice",
+    "kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod{uid}.slice",
+    "kubepods/kubepods-burstable.slice/kubepods-burstable-pod{uid}.slice",
+    "kubepods/pod{uid}",
+]
+
+# -----------------------------------------------------------------------------
+# Prometheus metrics exposed by the controller itself
+# -----------------------------------------------------------------------------
+drcio_hp_weight = Gauge("drcio_hp_weight", "Current I/O weight for HP pods")
+drcio_lp_weight = Gauge("drcio_lp_weight", "Current I/O weight for LP pods")
+drcio_hp_latency_ms = Gauge(
+    "drcio_hp_latency_ms", "Current HP service P95 latency in ms"
+)
+drcio_adjustments_total = Counter(
+    "drcio_adjustments_total", "Total number of I/O weight adjustments"
+)
+drcio_errors_total = Counter(
+    "drcio_errors_total", "Total number of errors encountered", ["error_type"]
+)
+drcio_pod_count = Gauge(
+    "drcio_pod_count",
+    "Number of pods under DRC-IO management",
+    ["priority"],
+)
+drcio_last_adjustment_ts = Gauge(
+    "drcio_last_adjustment_timestamp",
+    "Unix epoch timestamp of the last successful adjustment",
+)
+drcio_control_loop_duration = Histogram(
+    "drcio_control_loop_duration_seconds",
+    "Duration of a single DRC-IO control loop iteration",
+    buckets=(
+        0.05,
+        0.1,
+        0.2,
+        0.3,
+        0.5,
+        0.75,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        5.0,
+    ),
 )
 
-IO_WEIGHT_APPLIED = Counter(
-    'drcio_io_weight_applied_total',
-    'Total I/O weight adjustments applied',
-    ['workload_type', 'priority']
-)
-
-CURRENT_IO_WEIGHT = Gauge(
-    'drcio_io_weight',
-    'Current I/O weight value',
-    ['pod_name', 'namespace', 'priority']
-)
-
-IO_BYTES_READ = Gauge(
-    'drcio_io_bytes_read',
-    'Bytes read from disk',
-    ['pod_name', 'namespace', 'priority']
-)
-
-IO_BYTES_WRITE = Gauge(
-    'drcio_io_bytes_write',
-    'Bytes written to disk',
-    ['pod_name', 'namespace', 'priority']
-)
-
-CONTROL_LOOP_DURATION = Histogram(
-    'drcio_control_loop_duration_seconds',
-    'Duration of control loop execution'
-)
-
-ACTIVE_PODS = Gauge(
-    'drcio_active_pods',
-    'Number of active pods under management',
-    ['priority']
-)
-
-# Global state
-shutdown_requested = False
+# -----------------------------------------------------------------------------
+# Graceful shutdown handling
+# -----------------------------------------------------------------------------
+running = True
 
 
-##############################################################################
-# Cgroup I/O Management
-##############################################################################
-
-class CgroupIOManager:
-    """
-    Manages cgroup v2 I/O controls for container workloads.
-    """
-
-    def __init__(self):
-        self.cgroup_root = Path("/sys/fs/cgroup")
-        self.cgroup_v2_enabled = self._check_cgroup_v2()
-
-        if self.cgroup_v2_enabled:
-            logger.info("✓ cgroup v2 detected and enabled")
-        else:
-            logger.warning("⚠ cgroup v2 not available, I/O control will be limited")
-
-    def _check_cgroup_v2(self):
-        """Check if cgroup v2 is available."""
-        # Check for unified hierarchy
-        try:
-            with open("/proc/mounts", "r") as f:
-                for line in f:
-                    if "cgroup2" in line:
-                        return True
-        except Exception as e:
-            logger.error(f"Failed to check cgroup version: {e}")
-
-        return False
-
-    def get_pod_cgroup_path(self, pod_uid):
-        """
-        Find the cgroup path for a pod.
-
-        Args:
-            pod_uid: Kubernetes pod UID
-
-        Returns:
-            Path object to the pod's cgroup directory, or None if not found
-        """
-        # Common cgroup paths for different container runtimes
-        possible_paths = [
-            # containerd
-            self.cgroup_root / "kubepods.slice" / f"kubepods-pod{pod_uid}.slice",
-            self.cgroup_root / "kubepods" / f"pod{pod_uid}",
-            # docker
-            self.cgroup_root / "kubepods" / "burstable" / f"pod{pod_uid}",
-            self.cgroup_root / "kubepods" / "besteffort" / f"pod{pod_uid}",
-        ]
-
-        for path in possible_paths:
-            if path.exists():
-                return path
-
-        # Search for pod UID in cgroup hierarchy
-        try:
-            for path in self.cgroup_root.rglob(f"*{pod_uid}*"):
-                if path.is_dir():
-                    return path
-        except Exception as e:
-            logger.debug(f"Error searching for cgroup: {e}")
-
-        return None
-
-    def get_io_stats(self, cgroup_path):
-        """
-        Read I/O statistics from cgroup.
-
-        Args:
-            cgroup_path: Path to cgroup directory
-
-        Returns:
-            Dict with I/O statistics
-        """
-        stats = {
-            'rbytes': 0,
-            'wbytes': 0,
-            'rios': 0,
-            'wios': 0
-        }
-
-        try:
-            # Read io.stat (cgroup v2)
-            io_stat_file = cgroup_path / "io.stat"
-            if io_stat_file.exists():
-                with open(io_stat_file, 'r') as f:
-                    for line in f:
-                        parts = line.split()
-                        if len(parts) < 2:
-                            continue
-
-                        # Parse device stats
-                        for item in parts[1:]:
-                            if '=' in item:
-                                key, value = item.split('=')
-                                if key in stats:
-                                    stats[key] += int(value)
-
-        except Exception as e:
-            logger.debug(f"Failed to read I/O stats from {cgroup_path}: {e}")
-
-        return stats
-
-    def set_io_weight(self, cgroup_path, weight):
-        """
-        Set I/O weight for a cgroup.
-
-        Args:
-            cgroup_path: Path to cgroup directory
-            weight: I/O weight value (1-10000, default 100)
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.cgroup_v2_enabled:
-            logger.debug("cgroup v2 not available, skipping I/O weight setting")
-            return False
-
-        try:
-            io_weight_file = cgroup_path / "io.weight"
-
-            if not io_weight_file.exists():
-                logger.debug(f"io.weight not found at {cgroup_path}")
-                return False
-
-            # Validate weight range
-            weight = max(1, min(10000, int(weight)))
-
-            # Write weight
-            with open(io_weight_file, 'w') as f:
-                f.write(f"default {weight}\n")
-
-            logger.debug(f"Set I/O weight to {weight} for {cgroup_path}")
-            return True
-
-        except PermissionError:
-            logger.error(f"Permission denied writing to {io_weight_file}")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to set I/O weight: {e}")
-            return False
-
-    def get_current_io_weight(self, cgroup_path):
-        """
-        Get current I/O weight for a cgroup.
-
-        Args:
-            cgroup_path: Path to cgroup directory
-
-        Returns:
-            Current I/O weight value, or None if unavailable
-        """
-        try:
-            io_weight_file = cgroup_path / "io.weight"
-
-            if not io_weight_file.exists():
-                return None
-
-            with open(io_weight_file, 'r') as f:
-                line = f.readline().strip()
-                # Format: "default 100" or "default 100\n8:0 200"
-                if line.startswith("default"):
-                    return int(line.split()[1])
-
-        except Exception as e:
-            logger.debug(f"Failed to read I/O weight: {e}")
-
-        return None
+def signal_handler(signum, _frame):
+    global running
+    logger.info("Received signal %s, shutting down gracefully...", signum)
+    running = False
 
 
-##############################################################################
-# DRC-IO Controller
-##############################################################################
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
 
 class DRCIOController:
-    """
-    Main controller for DRC-IO system.
-    """
+    """Dynamic Resource Controller implementation."""
 
-    # I/O weight configuration
-    IO_WEIGHTS = {
-        'high': 1000,    # High priority (10x baseline)
-        'medium': 100,   # Medium priority (baseline)
-        'low': 10        # Low priority (1/10 baseline)
-    }
+    def __init__(self):
+        self.namespace = K8S_NAMESPACE
+        self.sla_threshold_ms = SLA_THRESHOLD_MS
+        self.prometheus_url = PROMETHEUS_URL.rstrip("/")
+        self.hp_weight = 500
+        self.lp_weight = 500
+        self.adjustment_count = 0
+        self.last_adjustment_time: Optional[float] = None
+        self.http = requests.Session()
+        self.http.headers.update({"User-Agent": "drcio-controller/1.0"})
 
-    # Priority labels
-    PRIORITY_LABEL = "drcio.io/priority"
+        self._load_kube_client()
 
-    def __init__(self, node_name=None):
-        self.node_name = node_name or os.getenv('NODE_NAME', 'unknown')
-        self.namespace = os.getenv('NAMESPACE', 'default')
+        logger.info("DRC-IO Controller initialized")
+        logger.info("Namespace: %s", self.namespace)
+        logger.info("Prometheus: %s", self.prometheus_url)
+        logger.info("SLA Threshold: %.0f ms", self.sla_threshold_ms)
+        logger.info("I/O weight bounds: %s - %s", MIN_IO_WEIGHT, MAX_IO_WEIGHT)
+        logger.info("Control loop interval: %ss", CONTROL_LOOP_INTERVAL)
 
-        # Initialize Kubernetes client
+    def _load_kube_client(self):
+        """Load Kubernetes config (in cluster first, fall back to kubeconfig)."""
         try:
-            # Try in-cluster config first
             config.load_incluster_config()
-            logger.info("✓ Loaded in-cluster Kubernetes config")
-        except:
-            try:
-                # Fall back to kubeconfig
-                config.load_kube_config()
-                logger.info("✓ Loaded kubeconfig")
-            except Exception as e:
-                logger.error(f"Failed to load Kubernetes config: {e}")
-                sys.exit(1)
-
+            logger.info("Loaded in-cluster Kubernetes config")
+        except Exception:
+            config.load_kube_config()
+            logger.info("Loaded local kubeconfig")
         self.k8s_api = client.CoreV1Api()
 
-        # Initialize cgroup manager
-        self.cgroup_mgr = CgroupIOManager()
+    # ------------------------------------------------------------------ Pod discovery
+    def discover_pods(self) -> Tuple[List[Dict], List[Dict]]:
+        """Discover HP and LP pods in the managed namespace."""
+        try:
+            pods = self.k8s_api.list_namespaced_pod(self.namespace, watch=False)
+        except Exception as exc:
+            logger.error("Error discovering pods: %s", exc, exc_info=True)
+            drcio_errors_total.labels(error_type="pod_discovery").inc()
+            return [], []
 
-        # Pod tracking
-        self.managed_pods = {}  # pod_uid -> pod_info
-        self.pod_stats = defaultdict(lambda: {'last_rbytes': 0, 'last_wbytes': 0})
+        hp_pods: List[Dict] = []
+        lp_pods: List[Dict] = []
 
-        logger.info(f"✓ DRC-IO Controller initialized for node: {self.node_name}")
-
-    def run(self):
-        """Run the main control loop."""
-        logger.info("=" * 60)
-        logger.info("Starting DRC-IO Controller")
-        logger.info("=" * 60)
-        logger.info(f"Node: {self.node_name}")
-        logger.info(f"Namespace: {self.namespace}")
-        logger.info("=" * 60)
-
-        # Start pod discovery thread
-        discovery_thread = threading.Thread(target=self._pod_discovery_loop, daemon=True)
-        discovery_thread.start()
-
-        # Run main control loop
-        self._control_loop()
-
-    def _pod_discovery_loop(self):
-        """Continuously discover and track pods on this node."""
-        logger.info("Starting pod discovery loop...")
-
-        while not shutdown_requested:
-            try:
-                # List pods on this node
-                field_selector = f"spec.nodeName={self.node_name},status.phase=Running"
-                pods = self.k8s_api.list_pod_for_all_namespaces(
-                    field_selector=field_selector,
-                    timeout_seconds=10
-                )
-
-                current_pod_uids = set()
-
-                for pod in pods.items:
-                    pod_uid = pod.metadata.uid.replace('-', '_')
-                    current_pod_uids.add(pod_uid)
-
-                    # Check if pod has DRC-IO priority label
-                    labels = pod.metadata.labels or {}
-                    priority = labels.get(self.PRIORITY_LABEL, 'medium')
-
-                    # Add or update pod
-                    if pod_uid not in self.managed_pods:
-                        self.managed_pods[pod_uid] = {
-                            'name': pod.metadata.name,
-                            'namespace': pod.metadata.namespace,
-                            'priority': priority,
-                            'uid': pod_uid
-                        }
-
-                        WORKLOAD_DISCOVERY.labels(
-                            workload_type='pod',
-                            priority=priority
-                        ).inc()
-
-                        logger.info(
-                            f"Discovered pod: {pod.metadata.namespace}/{pod.metadata.name} "
-                            f"(priority: {priority})"
-                        )
-
-                # Remove pods that are no longer running
-                removed_pods = set(self.managed_pods.keys()) - current_pod_uids
-                for pod_uid in removed_pods:
-                    pod_info = self.managed_pods.pop(pod_uid)
-                    logger.info(f"Removed pod: {pod_info['namespace']}/{pod_info['name']}")
-
-                # Update active pod counts
-                priority_counts = defaultdict(int)
-                for pod_info in self.managed_pods.values():
-                    priority_counts[pod_info['priority']] += 1
-
-                for priority, count in priority_counts.items():
-                    ACTIVE_PODS.labels(priority=priority).set(count)
-
-            except Exception as e:
-                logger.error(f"Error in pod discovery: {e}", exc_info=True)
-
-            # Sleep before next discovery
-            time.sleep(10)
-
-    def _control_loop(self):
-        """Main control loop for I/O management."""
-        logger.info("Starting control loop...")
-
-        while not shutdown_requested:
-            loop_start = time.time()
-
-            try:
-                self._apply_io_controls()
-                self._collect_metrics()
-
-            except Exception as e:
-                logger.error(f"Error in control loop: {e}", exc_info=True)
-
-            # Record loop duration
-            loop_duration = time.time() - loop_start
-            CONTROL_LOOP_DURATION.observe(loop_duration)
-
-            # Sleep until next iteration
-            sleep_time = max(0, 5 - loop_duration)  # 5-second interval
-            time.sleep(sleep_time)
-
-    def _apply_io_controls(self):
-        """Apply I/O weights to managed pods."""
-        for pod_uid, pod_info in self.managed_pods.items():
-            # Find cgroup path
-            cgroup_path = self.cgroup_mgr.get_pod_cgroup_path(pod_uid)
-
-            if not cgroup_path:
-                logger.debug(f"Cgroup not found for pod {pod_info['name']}")
+        for pod in pods.items:
+            if pod.status.phase != "Running":
                 continue
 
-            # Get target I/O weight based on priority
-            priority = pod_info['priority']
-            target_weight = self.IO_WEIGHTS.get(priority, self.IO_WEIGHTS['medium'])
+            labels = pod.metadata.labels or {}
+            group_id = labels.get("group-id")
+            pod_info = {
+                "name": pod.metadata.name,
+                "uid": pod.metadata.uid,
+                "node": pod.spec.node_name,
+                "namespace": pod.metadata.namespace,
+                "labels": labels,
+            }
 
-            # Get current weight
-            current_weight = self.cgroup_mgr.get_current_io_weight(cgroup_path)
+            if group_id == "hp":
+                hp_pods.append(pod_info)
+            elif group_id == "lp":
+                lp_pods.append(pod_info)
 
-            # Apply weight if different
-            if current_weight != target_weight:
-                success = self.cgroup_mgr.set_io_weight(cgroup_path, target_weight)
+        drcio_pod_count.labels("hp").set(len(hp_pods))
+        drcio_pod_count.labels("lp").set(len(lp_pods))
+        logger.debug("Discovered %d HP pods and %d LP pods", len(hp_pods), len(lp_pods))
+        return hp_pods, lp_pods
 
-                if success:
-                    IO_WEIGHT_APPLIED.labels(
-                        workload_type='pod',
-                        priority=priority
-                    ).inc()
+    # ------------------------------------------------------------------ Metrics ingestion
+    def get_hp_latency(self) -> Optional[float]:
+        """Return HP service P95 latency (ms) from Prometheus."""
+        query = (
+            "histogram_quantile(0.95, "
+            "sum(rate(http_request_duration_seconds_bucket{"
+            f'namespace="{self.namespace}",group_id="hp"'
+            "}[1m])) by (le))"
+        )
+        try:
+            response = self.http.get(
+                f"{self.prometheus_url}/api/v1/query",
+                params={"query": query},
+                timeout=5,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("Error querying Prometheus: %s", exc)
+            drcio_errors_total.labels(error_type="prometheus_query").inc()
+            return None
 
-                    logger.info(
-                        f"Applied I/O weight {target_weight} to "
-                        f"{pod_info['namespace']}/{pod_info['name']} (priority: {priority})"
-                    )
+        result = response.json()
+        if result.get("status") != "success":
+            logger.warning("Prometheus query unsuccessful: %s", result)
+            return None
 
-            # Update metrics
-            CURRENT_IO_WEIGHT.labels(
-                pod_name=pod_info['name'],
-                namespace=pod_info['namespace'],
-                priority=priority
-            ).set(target_weight)
+        data = result.get("data", {}).get("result")
+        if not data:
+            logger.debug("Prometheus returned no latency samples")
+            return None
 
-    def _collect_metrics(self):
-        """Collect I/O metrics from managed pods."""
-        for pod_uid, pod_info in self.managed_pods.items():
-            # Find cgroup path
-            cgroup_path = self.cgroup_mgr.get_pod_cgroup_path(pod_uid)
+        try:
+            latency_seconds = float(data[0]["value"][1])
+        except (KeyError, ValueError, TypeError) as exc:
+            logger.error("Unable to parse Prometheus latency response: %s", exc)
+            drcio_errors_total.labels(error_type="prometheus_parse").inc()
+            return None
 
-            if not cgroup_path:
-                continue
+        latency_ms = latency_seconds * 1000
+        drcio_hp_latency_ms.set(latency_ms)
+        return latency_ms
 
-            # Get I/O stats
-            stats = self.cgroup_mgr.get_io_stats(cgroup_path)
+    # ------------------------------------------------------------------ I/O scheduling logic
+    def calculate_weights(self, current_latency_ms: float) -> Tuple[int, int]:
+        """
+        Decide new HP/LP weights. The further away from SLA, the more aggressive
+        the prioritization of HP workloads. Returns (hp_weight, lp_weight).
+        """
+        threshold = self.sla_threshold_ms
 
-            # Update Prometheus metrics
-            IO_BYTES_READ.labels(
-                pod_name=pod_info['name'],
-                namespace=pod_info['namespace'],
-                priority=pod_info['priority']
-            ).set(stats['rbytes'])
+        if current_latency_ms > threshold * 1.3:
+            weights = (900, 100)
+        elif current_latency_ms > threshold * 1.1:
+            weights = (800, 200)
+        elif current_latency_ms > threshold:
+            weights = (750, 250)
+        elif current_latency_ms > threshold * 0.8:
+            weights = (700, 300)
+        elif current_latency_ms > threshold * 0.6:
+            weights = (600, 400)
+        else:
+            weights = (500, 500)
 
-            IO_BYTES_WRITE.labels(
-                pod_name=pod_info['name'],
-                namespace=pod_info['namespace'],
-                priority=pod_info['priority']
-            ).set(stats['wbytes'])
-
-            # Calculate rates
-            last_stats = self.pod_stats[pod_uid]
-            read_rate = stats['rbytes'] - last_stats['last_rbytes']
-            write_rate = stats['wbytes'] - last_stats['last_wbytes']
-
-            # Update last stats
-            self.pod_stats[pod_uid]['last_rbytes'] = stats['rbytes']
-            self.pod_stats[pod_uid]['last_wbytes'] = stats['wbytes']
-
-            if read_rate > 0 or write_rate > 0:
-                logger.debug(
-                    f"Pod {pod_info['name']}: "
-                    f"read={self._format_bytes(read_rate)}/s, "
-                    f"write={self._format_bytes(write_rate)}/s"
-                )
+        return tuple(self._clamp_weight(w) for w in weights)  # type: ignore
 
     @staticmethod
-    def _format_bytes(bytes_value):
-        """Format bytes in human-readable format."""
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if bytes_value < 1024.0:
-                return f"{bytes_value:.2f} {unit}"
-            bytes_value /= 1024.0
-        return f"{bytes_value:.2f} PB"
+    def _clamp_weight(weight: int) -> int:
+        return max(MIN_IO_WEIGHT, min(MAX_IO_WEIGHT, weight))
 
+    # ------------------------------------------------------------------ cgroup helpers
+    def get_cgroup_path(self, pod_info: Dict) -> Optional[str]:
+        """Locate the pod's cgroup directory."""
+        pod_uid = pod_info["uid"]
+        sanitized_uid = pod_uid.replace("-", "_")
 
-##############################################################################
-# Signal Handling
-##############################################################################
+        for pattern in CGROUP_PATTERNS:
+            candidate = os.path.join(CGROUP_ROOT, pattern.format(uid=sanitized_uid))
+            if os.path.isdir(candidate):
+                return candidate
 
-def signal_handler(signum, frame):
-    """Handle shutdown signals."""
-    global shutdown_requested
+        # Fallback to slower glob search
+        try:
+            matches = glob.glob(
+                os.path.join(CGROUP_ROOT, f"**/*pod{sanitized_uid}*"), recursive=True
+            )
+            for match in matches:
+                if os.path.isdir(match):
+                    return match
+        except OSError as exc:
+            logger.debug("Error during cgroup glob search: %s", exc)
 
-    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
-    shutdown_requested = True
+        logger.warning("Could not locate cgroup for pod %s (%s)", pod_info["name"], pod_uid)
+        return None
 
+    def apply_io_weight(self, pod_info: Dict, weight: int) -> bool:
+        """
+        Apply io.weight to every container folder found for the pod.
+        Returns True if at least one container was updated.
+        """
+        cgroup_path = self.get_cgroup_path(pod_info)
+        if not cgroup_path:
+            return False
 
-##############################################################################
-# Main Entry Point
-##############################################################################
+        targets = []
+        direct_weight = os.path.join(cgroup_path, "io.weight")
+        if os.path.isfile(direct_weight):
+            targets.append(direct_weight)
+
+        for entry in glob.glob(os.path.join(cgroup_path, "*")):
+            candidate = os.path.join(entry, "io.weight")
+            if os.path.isfile(candidate):
+                targets.append(candidate)
+
+        if not targets:
+            logger.warning("No io.weight files found under %s", cgroup_path)
+            return False
+
+        success = False
+        for target in targets:
+            try:
+                with open(target, "w", encoding="utf-8") as handle:
+                    handle.write(f"default {weight}\n")
+                logger.debug("Set io.weight=%s for %s", weight, target)
+                success = True
+            except PermissionError:
+                logger.error("Permission denied writing %s", target)
+                drcio_errors_total.labels(error_type="permission_denied").inc()
+            except OSError as exc:
+                logger.error("Failed writing %s: %s", target, exc)
+                drcio_errors_total.labels(error_type="io_weight_write").inc()
+
+        return success
+
+    # ------------------------------------------------------------------ Control loop
+    def control_loop_iteration(self):
+        """Execute a single control loop iteration."""
+        start = time.time()
+        try:
+            hp_pods, lp_pods = self.discover_pods()
+            if not hp_pods:
+                logger.debug("No HP pods discovered; skipping iteration")
+                return
+
+            latency = self.get_hp_latency()
+            if latency is None:
+                logger.debug("Latency metrics unavailable; skipping adjustment check")
+                return
+
+            new_hp_weight, new_lp_weight = self.calculate_weights(latency)
+            if (
+                new_hp_weight == self.hp_weight
+                and new_lp_weight == self.lp_weight
+            ):
+                logger.debug(
+                    "Latency %.1f ms within tolerance; keeping weights HP=%d LP=%d",
+                    latency,
+                    self.hp_weight,
+                    self.lp_weight,
+                )
+                return
+
+            if self.last_adjustment_time:
+                elapsed = time.time() - self.last_adjustment_time
+                if elapsed < ADJUSTMENT_COOLDOWN:
+                    logger.debug(
+                        "Last adjustment %.1fs ago; waiting for cooldown (target %ss)",
+                        elapsed,
+                        ADJUSTMENT_COOLDOWN,
+                    )
+                    return
+
+            self._apply_new_weights(hp_pods, lp_pods, new_hp_weight, new_lp_weight, latency)
+        finally:
+            drcio_control_loop_duration.observe(time.time() - start)
+
+    def _apply_new_weights(
+        self,
+        hp_pods: List[Dict],
+        lp_pods: List[Dict],
+        new_hp_weight: int,
+        new_lp_weight: int,
+        latency: float,
+    ):
+        """Apply computed weights and emit structured logs/metrics."""
+        logger.info("╔════════════════════════════════════════════════════════╗")
+        logger.info("║              DRC-IO ADJUSTMENT TRIGGERED               ║")
+        logger.info("╠════════════════════════════════════════════════════════╣")
+        logger.info(
+            "║  HP Latency: %8.1f ms (SLA: %.0f ms)                       ║",
+            latency,
+            self.sla_threshold_ms,
+        )
+        logger.info(
+            "║  Old weights: HP=%4d  LP=%4d                               ║",
+            self.hp_weight,
+            self.lp_weight,
+        )
+        logger.info(
+            "║  New weights: HP=%4d  LP=%4d                               ║",
+            new_hp_weight,
+            new_lp_weight,
+        )
+
+        hp_success = sum(1 for pod in hp_pods if self.apply_io_weight(pod, new_hp_weight))
+        lp_success = sum(1 for pod in lp_pods if self.apply_io_weight(pod, new_lp_weight))
+
+        logger.info(
+            "║  Applied to:   %2d/%2d HP pods | %2d/%2d LP pods             ║",
+            hp_success,
+            len(hp_pods),
+            lp_success,
+            len(lp_pods),
+        )
+        logger.info("╚════════════════════════════════════════════════════════╝")
+
+        self.hp_weight = new_hp_weight
+        self.lp_weight = new_lp_weight
+        self.adjustment_count += 1
+        self.last_adjustment_time = time.time()
+        drcio_hp_weight.set(new_hp_weight)
+        drcio_lp_weight.set(new_lp_weight)
+        drcio_adjustments_total.inc()
+        drcio_last_adjustment_ts.set(self.last_adjustment_time)
+
+    def run(self):
+        """Main controller loop."""
+        logger.info("╔════════════════════════════════════════════════════════╗")
+        logger.info("║            DRC-IO CONTROLLER STARTING                  ║")
+        logger.info("╚════════════════════════════════════════════════════════╝")
+        iteration = 0
+
+        while running:
+            iteration += 1
+            try:
+                self.control_loop_iteration()
+                if iteration % 10 == 0:
+                    logger.info(
+                        "Status: %d adjustments | current weights HP=%d, LP=%d",
+                        self.adjustment_count,
+                        self.hp_weight,
+                        self.lp_weight,
+                    )
+            except Exception as exc:
+                logger.error("Unexpected error in control loop: %s", exc, exc_info=True)
+                drcio_errors_total.labels(error_type="control_loop").inc()
+            finally:
+                time.sleep(CONTROL_LOOP_INTERVAL)
+
+        logger.info("DRC-IO Controller shutting down. Total adjustments: %d", self.adjustment_count)
+
 
 def main():
-    """Main entry point."""
-    # Register signal handlers
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
-    # Get configuration from environment
-    metrics_port = int(os.getenv('METRICS_PORT', 9100))
-    node_name = os.getenv('NODE_NAME')
-
-    if not node_name:
-        logger.error("NODE_NAME environment variable not set")
-        sys.exit(1)
-
-    # Start Prometheus metrics server
-    logger.info(f"Starting Prometheus metrics server on port {metrics_port}...")
-    start_http_server(metrics_port)
-
-    # Create and run controller
-    try:
-        controller = DRCIOController(node_name=node_name)
-        controller.run()
-
-        logger.info("✓ Controller stopped gracefully")
-        sys.exit(0)
-
-    except Exception as e:
-        logger.error(f"Controller failed: {str(e)}", exc_info=True)
-        sys.exit(1)
+    """Entrypoint."""
+    start_http_server(METRICS_PORT)
+    logger.info("Prometheus metrics server started on port %d", METRICS_PORT)
+    controller = DRCIOController()
+    controller.run()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

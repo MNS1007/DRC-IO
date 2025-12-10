@@ -1,15 +1,11 @@
----
-# DRC-IO Controller DaemonSet
-# Runs one controller instance per node to manage I/O resources
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: drcio-controller
-  namespace: default
+  namespace: fraud-detection
   labels:
     app: drcio-controller
     component: controller
-    version: v1.0.0
 spec:
   selector:
     matchLabels:
@@ -23,217 +19,63 @@ spec:
       labels:
         app: drcio-controller
         component: controller
-        version: v1.0.0
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "9100"
+        prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
-      # Use the service account with appropriate permissions
-      serviceAccountName: drcio-controller
-
-      # Host network and PID namespace access
-      hostNetwork: true
+      serviceAccountName: drcio-sa
       hostPID: true
-
-      # Tolerations to run on all nodes (including master)
+      hostNetwork: true
       tolerations:
-        - key: node-role.kubernetes.io/master
-          operator: Exists
-          effect: NoSchedule
-        - key: node-role.kubernetes.io/control-plane
-          operator: Exists
-          effect: NoSchedule
-        - key: node.kubernetes.io/not-ready
-          operator: Exists
-          effect: NoExecute
-          tolerationSeconds: 300
-        - key: node.kubernetes.io/unreachable
-          operator: Exists
-          effect: NoExecute
-          tolerationSeconds: 300
-
-      # Priority class for system components
-      priorityClassName: system-node-critical
-
+      - operator: Exists
       containers:
-        - name: controller
-          image: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/drcio/controller:latest
-          imagePullPolicy: Always
-
-          # Security context - needs elevated privileges for cgroup access
-          securityContext:
-            privileged: true
-            capabilities:
-              add:
-                - SYS_ADMIN
-                - SYS_RESOURCE
-            runAsUser: 0
-
-          env:
-            # Node name from downward API
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-
-            # Namespace
-            - name: NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-
-            # Metrics port
-            - name: METRICS_PORT
-              value: "9100"
-
-            # Log level
-            - name: LOG_LEVEL
-              value: "INFO"
-
-          # Resource requests and limits
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 200m
-              memory: 256Mi
-
-          # Ports
-          ports:
-            - name: metrics
-              containerPort: 9100
-              protocol: TCP
-              hostPort: 9100
-
-          # Volume mounts for cgroup access
-          volumeMounts:
-            # cgroup v2 unified hierarchy
-            - name: cgroup
-              mountPath: /sys/fs/cgroup
-              mountPropagation: HostToContainer
-
-            # proc filesystem
-            - name: proc
-              mountPath: /host/proc
-              readOnly: true
-
-            # sys filesystem
-            - name: sys
-              mountPath: /host/sys
-              readOnly: true
-
-          # Liveness probe
-          livenessProbe:
-            httpGet:
-              path: /metrics
-              port: 9100
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            timeoutSeconds: 10
-            successThreshold: 1
-            failureThreshold: 3
-
-          # Readiness probe
-          readinessProbe:
-            httpGet:
-              path: /metrics
-              port: 9100
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 5
-            successThreshold: 1
-            failureThreshold: 3
-
-      # Volumes
-      volumes:
-        # cgroup filesystem
+      - name: drcio
+        image: IMAGE_REGISTRY/drcio-controller:IMAGE_TAG
+        imagePullPolicy: Always
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+            - SYS_ADMIN
+        env:
+        - name: PROMETHEUS_URL
+          value: "http://prometheus-kube-prometheus-prometheus.monitoring:9090"
+        - name: SLA_THRESHOLD_MS
+          value: "500"
+        - name: CONTROL_LOOP_INTERVAL
+          value: "5"
+        - name: K8S_NAMESPACE
+          value: "fraud-detection"
+        - name: METRICS_PORT
+          value: "8080"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        volumeMounts:
         - name: cgroup
-          hostPath:
-            path: /sys/fs/cgroup
-            type: Directory
-
-        # proc filesystem
-        - name: proc
-          hostPath:
-            path: /proc
-            type: Directory
-
-        # sys filesystem
-        - name: sys
-          hostPath:
-            path: /sys
-            type: Directory
-
-      # DNS policy
-      dnsPolicy: ClusterFirst
-
-      # Restart policy
-      restartPolicy: Always
-
-      # Termination grace period
-      terminationGracePeriodSeconds: 30
-
----
-# Service for DRC-IO Controller metrics
-apiVersion: v1
-kind: Service
-metadata:
-  name: drcio-controller-metrics
-  namespace: default
-  labels:
-    app: drcio-controller
-    component: controller
-  annotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/port: "9100"
-spec:
-  type: ClusterIP
-  clusterIP: None  # Headless service
-  selector:
-    app: drcio-controller
-  ports:
-    - name: metrics
-      protocol: TCP
-      port: 9100
-      targetPort: 9100
-
----
-# ServiceMonitor for Prometheus Operator
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: drcio-controller
-  namespace: default
-  labels:
-    app: drcio-controller
-    release: prometheus
-spec:
-  selector:
-    matchLabels:
-      app: drcio-controller
-  endpoints:
-    - port: metrics
-      interval: 15s
-      scrapeTimeout: 10s
-      path: /metrics
-
----
-# PodMonitor for DRC-IO Controller (alternative to ServiceMonitor)
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
-metadata:
-  name: drcio-controller
-  namespace: default
-  labels:
-    app: drcio-controller
-    release: prometheus
-spec:
-  selector:
-    matchLabels:
-      app: drcio-controller
-  podMetricsEndpoints:
-    - port: metrics
-      interval: 15s
-      path: /metrics
+          mountPath: /sys/fs/cgroup
+        - name: kubepods
+          mountPath: /var/lib/kubelet/pods
+          readOnly: true
+      volumes:
+      - name: cgroup
+        hostPath:
+          path: /sys/fs/cgroup
+          type: Directory
+      - name: kubepods
+        hostPath:
+          path: /var/lib/kubelet/pods
+          type: Directory

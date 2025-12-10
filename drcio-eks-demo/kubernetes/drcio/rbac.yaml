@@ -1,65 +1,33 @@
----
-# ClusterRole for DRC-IO Controller
-# Grants permissions to read pod information and node details
+# Allow the controller to list pods/nodes across the cluster for group discovery.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: drcio-controller
+  name: drcio-role
   labels:
     app: drcio-controller
-    component: controller
 rules:
-  # Pod permissions
-  - apiGroups: [""]
-    resources:
-      - pods
-      - pods/status
-    verbs:
-      - get
-      - list
-      - watch
-
-  # Node permissions
-  - apiGroups: [""]
-    resources:
-      - nodes
-      - nodes/status
-    verbs:
-      - get
-      - list
-      - watch
-
-  # ConfigMap permissions (for configuration)
-  - apiGroups: [""]
-    resources:
-      - configmaps
-    verbs:
-      - get
-      - list
-      - watch
-
-  # Event permissions (for logging events)
-  - apiGroups: [""]
-    resources:
-      - events
-    verbs:
-      - create
-      - patch
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
 
 ---
-# ClusterRoleBinding for DRC-IO Controller
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: drcio-controller
+  name: drcio-binding
   labels:
     app: drcio-controller
-    component: controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: drcio-controller
+  name: drcio-role
 subjects:
-  - kind: ServiceAccount
-    name: drcio-controller
-    namespace: default
+- kind: ServiceAccount
+  name: drcio-sa
+  namespace: fraud-detection

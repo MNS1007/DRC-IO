@@ -1,4 +1,2 @@
-# DRC-IO Low-Priority Batch Service Dependencies
-
-# Metrics and monitoring
-prometheus-client==0.19.0
+# No external dependencies needed for basic batch job
+# All using Python standard library
