@@ -1,0 +1,288 @@
+# Prometheus Stack Configuration for DRC-IO Demo
+# This configures the kube-prometheus-stack Helm chart with
+# custom settings for monitoring DRC-IO workloads
+
+# Prometheus Configuration
+prometheus:
+  prometheusSpec:
+    # Resource limits
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+    # Retention period
+    retention: 7d
+    retentionSize: "10GB"
+
+    # Storage configuration
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+
+    # Scrape interval
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+
+    # Service monitors
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+    # Additional scrape configs for DRC-IO services
+    additionalScrapeConfigs:
+      # DRC-IO Controller metrics
+      - job_name: 'drcio-controller'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - default
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: drcio-controller
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:9100
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            action: replace
+            target_label: node
+
+      # High-Priority GNN Service metrics
+      - job_name: 'hp-gnn-service'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - default
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: hp-gnn-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:5000
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+
+      # Low-Priority Batch metrics
+      - job_name: 'lp-batch-jobs'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - default
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_job_name]
+            action: keep
+            regex: lp-batch.*
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:8000
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+
+# Grafana Configuration
+grafana:
+  enabled: true
+
+  # Admin password (change in production!)
+  adminPassword: "admin123"
+
+  # Resource limits
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+
+  # Persistence
+  persistence:
+    enabled: true
+    size: 5Gi
+
+  # Default dashboards
+  defaultDashboardsEnabled: true
+
+  # Additional datasources
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          url: http://prometheus-kube-prometheus-prometheus:9090
+          access: proxy
+          isDefault: true
+          jsonData:
+            timeInterval: 15s
+
+  # Dashboard providers
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: 'drcio'
+          orgId: 1
+          folder: 'DRC-IO'
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/drcio
+
+  # Custom dashboards (will be configured separately)
+  dashboards:
+    drcio:
+      drcio-overview:
+        file: dashboards/drcio-dashboard.json
+
+  # Grafana ini configuration
+  grafana.ini:
+    server:
+      root_url: "http://localhost:3000"
+    analytics:
+      check_for_updates: false
+    security:
+      allow_embedding: true
+
+# Alertmanager Configuration
+alertmanager:
+  enabled: true
+
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 100m
+        memory: 256Mi
+
+    # Storage
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+# Node Exporter Configuration
+nodeExporter:
+  enabled: true
+
+# Kube State Metrics Configuration
+kubeStateMetrics:
+  enabled: true
+
+# Prometheus Operator Configuration
+prometheusOperator:
+  enabled: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Custom rules for DRC-IO
+additionalPrometheusRulesMap:
+  drcio-rules:
+    groups:
+      - name: drcio.rules
+        interval: 30s
+        rules:
+          # High I/O latency alert for HP workloads
+          - alert: HighPriorityIOLatencyHigh
+            expr: |
+              histogram_quantile(0.95,
+                rate(gnn_request_latency_seconds_bucket[5m])
+              ) > 1.0
+            for: 2m
+            labels:
+              severity: warning
+              component: drcio
+            annotations:
+              summary: "High-priority workload experiencing high I/O latency"
+              description: "95th percentile latency is {{ $value }}s for {{ $labels.pod }}"
+
+          # Low priority workload throttling
+          - alert: LowPriorityIOThrottled
+            expr: |
+              rate(batch_io_operations_total{status="error"}[5m]) > 0.1
+            for: 5m
+            labels:
+              severity: info
+              component: drcio
+            annotations:
+              summary: "Low-priority workload is being throttled"
+              description: "Batch I/O error rate: {{ $value | humanize }}/s"
+
+          # DRC-IO controller status
+          - alert: DRCIOControllerDown
+            expr: |
+              up{job="drcio-controller"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              component: drcio
+            annotations:
+              summary: "DRC-IO controller is down"
+              description: "Controller on node {{ $labels.node }} is not responding"
+
+          # I/O weight not applied
+          - alert: IOWeightNotApplied
+            expr: |
+              increase(drcio_io_weight_applied_total[5m]) == 0
+            for: 10m
+            labels:
+              severity: warning
+              component: drcio
+            annotations:
+              summary: "DRC-IO controller not applying I/O weights"
+              description: "No I/O weight changes in the last 10 minutes"
+
+# Disable components not needed for this demo
+coreDns:
+  enabled: false
+
+kubeDns:
+  enabled: false
+
+kubeEtcd:
+  enabled: false
+
+kubeScheduler:
+  enabled: false
+
+kubeControllerManager:
+  enabled: false

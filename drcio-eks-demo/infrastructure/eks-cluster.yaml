@@ -1,0 +1,119 @@
+---
+# DRC-IO Demo EKS Cluster Configuration
+# This creates a production-ready Kubernetes cluster on AWS EKS
+# for testing DRC-IO (Dynamic Resource Control for I/O)
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: drcio-demo
+  region: us-east-1
+  version: "1.28"
+
+# Enable IAM OIDC provider for service accounts
+iam:
+  withOIDC: true
+
+# CloudWatch logging configuration
+cloudWatch:
+  clusterLogging:
+    enableTypes:
+      - api
+      - audit
+      - authenticator
+      - controllerManager
+      - scheduler
+    logRetentionInDays: 7
+
+# Managed node group configuration
+managedNodeGroups:
+  - name: standard-workers
+    instanceType: t3.xlarge  # 4 vCPU, 16GB RAM
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 2
+
+    # Storage configuration
+    volumeSize: 50  # GB
+    volumeType: gp3
+    volumeIOPS: 3000
+    volumeThroughput: 125  # MB/s
+
+    # SSH access configuration
+    ssh:
+      allow: true
+      publicKeyPath: ~/.ssh/id_rsa.pub
+
+    # Labels for workload scheduling
+    labels:
+      role: worker
+      workload: general
+
+    # Taints for dedicated workloads (optional)
+    # taints:
+    #   - key: dedicated
+    #     value: drcio
+    #     effect: NoSchedule
+
+    # IAM policies for nodes
+    iam:
+      withAddonPolicies:
+        imageBuilder: true
+        autoScaler: true
+        ebs: true
+        efs: true
+        albIngress: true
+        cloudWatch: true
+
+    # Tags for cost tracking
+    tags:
+      Environment: demo
+      Project: drc-io
+      ManagedBy: eksctl
+      CostCenter: research
+
+    # Enable detailed monitoring
+    instanceMetadataOptions:
+      httpPutResponseHopLimit: 2
+      httpTokens: optional
+
+    # Private networking (recommended for production)
+    privateNetworking: false  # Set to true for production
+
+    # Security group configuration
+    securityGroups:
+      withShared: true
+      withLocal: true
+
+# Availability zones (automatically selected if not specified)
+availabilityZones:
+  - us-east-1a
+  - us-east-1b
+
+# VPC configuration (eksctl will create a new VPC)
+vpc:
+  cidr: 192.168.0.0/16
+  nat:
+    gateway: Single  # Use 'HighlyAvailable' for production
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+
+# Add-ons configuration
+addons:
+  - name: vpc-cni
+    version: latest
+    attachPolicyARNs:
+      - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+  - name: coredns
+    version: latest
+
+  - name: kube-proxy
+    version: latest
+
+  - name: aws-ebs-csi-driver
+    version: latest
+    wellKnownPolicies:
+      ebsCSIController: true

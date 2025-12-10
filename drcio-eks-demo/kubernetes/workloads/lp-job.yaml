@@ -1,0 +1,172 @@
+---
+# Low-Priority Batch I/O Stress Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lp-batch-stress
+  namespace: default
+  labels:
+    app: lp-batch
+    priority: low
+    drcio.io/priority: low
+spec:
+  # Number of completions
+  completions: 1
+
+  # Parallelism (run multiple pods concurrently)
+  parallelism: 2
+
+  # Backoff limit
+  backoffLimit: 3
+
+  # TTL after completion (auto-cleanup after 1 hour)
+  ttlSecondsAfterFinished: 3600
+
+  # Pod template
+  template:
+    metadata:
+      labels:
+        app: lp-batch
+        priority: low
+        drcio.io/priority: low  # DRC-IO priority label
+        job-name: lp-batch-stress
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      restartPolicy: OnFailure
+
+      containers:
+        - name: io-stress
+          image: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/drcio/lp-batch:latest
+          imagePullPolicy: Always
+
+          # Command arguments
+          args:
+            - "--work-dir=/data"
+            - "--file-size=104857600"        # 100 MB
+            - "--block-size=4096"            # 4 KB
+            - "--num-operations=2000"
+            - "--io-pattern=sequential"
+            - "--read-ratio=0.5"
+            - "--num-workers=4"
+            - "--metrics-port=8000"
+
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          # Resource requests and limits
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # Volume mounts
+          volumeMounts:
+            - name: work-dir
+              mountPath: /data
+
+          # Ports
+          ports:
+            - name: metrics
+              containerPort: 8000
+              protocol: TCP
+
+      # Volumes
+      volumes:
+        - name: work-dir
+          emptyDir:
+            sizeLimit: 2Gi
+
+      # Security context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+
+---
+# CronJob for periodic batch processing (optional)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lp-batch-stress-cron
+  namespace: default
+  labels:
+    app: lp-batch-cron
+    priority: low
+spec:
+  # Schedule: Run every hour
+  schedule: "0 * * * *"
+
+  # Concurrency policy
+  concurrencyPolicy: Forbid
+
+  # Success/failure history limits
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  # Job template
+  jobTemplate:
+    metadata:
+      labels:
+        app: lp-batch
+        priority: low
+        drcio.io/priority: low
+    spec:
+      completions: 1
+      parallelism: 1
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 3600
+
+      template:
+        metadata:
+          labels:
+            app: lp-batch
+            priority: low
+            drcio.io/priority: low
+        spec:
+          restartPolicy: OnFailure
+
+          containers:
+            - name: io-stress
+              image: <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/drcio/lp-batch:latest
+              args:
+                - "--work-dir=/data"
+                - "--num-operations=1000"
+                - "--io-pattern=sequential"
+                - "--read-ratio=0.5"
+              resources:
+                requests:
+                  cpu: 200m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: work-dir
+                  mountPath: /data
+
+          volumes:
+            - name: work-dir
+              emptyDir:
+                sizeLimit: 2Gi
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000

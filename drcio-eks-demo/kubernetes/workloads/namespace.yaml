@@ -1,0 +1,12 @@
+---
+# DRC-IO Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: drcio-demo
+  labels:
+    name: drcio-demo
+    project: drc-io
+    environment: demo
+  annotations:
+    description: "DRC-IO demonstration namespace for workload isolation"

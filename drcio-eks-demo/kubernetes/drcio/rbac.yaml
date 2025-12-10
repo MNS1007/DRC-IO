@@ -1,0 +1,65 @@
+---
+# ClusterRole for DRC-IO Controller
+# Grants permissions to read pod information and node details
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: drcio-controller
+  labels:
+    app: drcio-controller
+    component: controller
+rules:
+  # Pod permissions
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/status
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Node permissions
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/status
+    verbs:
+      - get
+      - list
+      - watch
+
+  # ConfigMap permissions (for configuration)
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+
+  # Event permissions (for logging events)
+  - apiGroups: [""]
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+
+---
+# ClusterRoleBinding for DRC-IO Controller
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: drcio-controller
+  labels:
+    app: drcio-controller
+    component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: drcio-controller
+subjects:
+  - kind: ServiceAccount
+    name: drcio-controller
+    namespace: default

@@ -1,0 +1,105 @@
+# Standalone Grafana Configuration
+# (This file is optional - Grafana is included in kube-prometheus-stack)
+#
+# Use this if you want to install Grafana separately from Prometheus
+
+# Grafana image
+image:
+  repository: grafana/grafana
+  tag: 10.2.2
+  pullPolicy: IfNotPresent
+
+# Replica count
+replicas: 1
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 80
+
+# Ingress (disabled by default)
+ingress:
+  enabled: false
+
+# Resources
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 200m
+    memory: 512Mi
+
+# Persistence
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClassName: gp2
+
+# Admin credentials
+adminUser: admin
+adminPassword: admin123
+
+# Datasources
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus-server
+        access: proxy
+        isDefault: true
+
+# Dashboard providers
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+
+# Dashboards
+dashboards:
+  default:
+    drcio-dashboard:
+      url: https://raw.githubusercontent.com/your-repo/drcio-dashboard.json
+
+# Plugins
+plugins:
+  - grafana-piechart-panel
+  - grafana-clock-panel
+
+# Environment variables
+env:
+  GF_SERVER_ROOT_URL: "http://localhost:3000"
+  GF_SECURITY_ADMIN_PASSWORD: admin123
+  GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+  GF_INSTALL_PLUGINS: ""
+
+# Security context
+securityContext:
+  runAsUser: 472
+  runAsGroup: 472
+  fsGroup: 472
+
+# Grafana ini configuration
+grafana.ini:
+  server:
+    root_url: "http://localhost:3000"
+  analytics:
+    check_for_updates: false
+    reporting_enabled: false
+  security:
+    admin_user: admin
+    admin_password: admin123
+  users:
+    allow_sign_up: false
+  auth.anonymous:
+    enabled: false
