@@ -7,6 +7,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
 log_section() {
     echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║ $1${NC}"
@@ -50,8 +53,8 @@ log_ok "Connected to Kubernetes cluster"
 echo ""
 
 log_step "1/5" "Creating namespace and storage"
-kubectl apply -f kubernetes/workloads/namespace.yaml
-kubectl apply -f kubernetes/workloads/storage.yaml
+kubectl apply -f "$REPO_ROOT/kubernetes/workloads/namespace.yaml"
+kubectl apply -f "$REPO_ROOT/kubernetes/workloads/storage.yaml"
 
 log_step "1a" "Waiting for PVC shared-data to bind"
 if ! kubectl wait --for=condition=Bound pvc/shared-data -n fraud-detection --timeout=120s; then
@@ -61,8 +64,8 @@ log_ok "Namespace and storage applied"
 echo ""
 
 log_step "2/5" "Deploying High-Priority GNN service"
-kubectl apply -f kubernetes/workloads/hp-deployment.yaml
-kubectl apply -f kubernetes/workloads/hp-service.yaml
+kubectl apply -f "$REPO_ROOT/kubernetes/workloads/hp-deployment.yaml"
+kubectl apply -f "$REPO_ROOT/kubernetes/workloads/hp-service.yaml"
 
 log_step "2a" "Waiting for HP pods to become ready"
 if ! kubectl wait --for=condition=Ready pod -l app=gnn-service -n fraud-detection --timeout=300s; then
@@ -72,7 +75,7 @@ log_ok "HP service manifests applied"
 echo ""
 
 log_step "3/5" "Retrieving LoadBalancer hostname for gnn-service"
-SERVICE_URL_FILE="service-url.txt"
+SERVICE_URL_FILE="$REPO_ROOT/service-url.txt"
 rm -f "$SERVICE_URL_FILE"
 LB_HOSTNAME=""
 for i in {1..60}; do
@@ -92,10 +95,10 @@ fi
 echo ""
 
 log_step "4/5" "Deploying DRC-IO controller"
-kubectl apply -f kubernetes/drcio/serviceaccount.yaml
-kubectl apply -f kubernetes/drcio/rbac.yaml
-kubectl apply -f kubernetes/drcio/daemonset.yaml
-kubectl apply -f kubernetes/drcio/service.yaml
+kubectl apply -f "$REPO_ROOT/kubernetes/drcio/serviceaccount.yaml"
+kubectl apply -f "$REPO_ROOT/kubernetes/drcio/rbac.yaml"
+kubectl apply -f "$REPO_ROOT/kubernetes/drcio/daemonset.yaml"
+kubectl apply -f "$REPO_ROOT/kubernetes/drcio/service.yaml"
 
 log_step "4a" "Waiting for DRC-IO pods"
 sleep 10
@@ -128,7 +131,7 @@ if [[ -f "$SERVICE_URL_FILE" ]]; then
     echo ""
 fi
 
-cat > deployment-info.txt <<EOF
+cat > "$REPO_ROOT/deployment-info.txt" <<EOF
 DRC-IO Deployment Information
 ==============================
 

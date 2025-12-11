@@ -1,0 +1,30 @@
+DRC-IO Deployment Information
+==============================
+
+Deployment Date: Wed Dec 10 15:35:39 EST 2025
+Namespace: fraud-detection
+
+Resources:
+----------
+HP Service (GNN):    2 pods (Deployment gnn-service)
+DRC-IO Controller:   1 pod per node (DaemonSet drcio-controller)
+LP Batch Job:        Not yet started (apply lp-job when ready)
+
+HP Service URL:
+---------------
+a470ed3e7aa2f4ffd8928fac1ac454fe-478668699.us-east-1.elb.amazonaws.com
+
+Helpful Commands:
+-----------------
+kubectl get pods -n fraud-detection
+kubectl logs -f deployment/gnn-service -n fraud-detection
+kubectl logs -f daemonset/drcio-controller -n fraud-detection
+kubectl get svc gnn-service -n fraud-detection
+kubectl apply -f kubernetes/workloads/lp-job.yaml   # start LP job
+kubectl delete job batch-stress -n fraud-detection  # stop LP job
+
+Test HP service:
+curl -X POST http://a470ed3e7aa2f4ffd8928fac1ac454fe-478668699.us-east-1.elb.amazonaws.com/predict \
+  -H "Content-Type: application/json" \
+  -d '{"transaction_id":"test","amount":100}'
+

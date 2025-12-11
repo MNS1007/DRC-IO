@@ -31,7 +31,7 @@ spec:
       - operator: Exists
       containers:
       - name: drcio
-        image: IMAGE_REGISTRY/drcio-controller:IMAGE_TAG
+        image: 320658617028.dkr.ecr.us-east-1.amazonaws.com/drcio-controller:v1.0.0
         imagePullPolicy: Always
         securityContext:
           privileged: true

@@ -21,6 +21,8 @@ app = Flask(__name__)
 SLA_THRESHOLD_MS = int(os.getenv('SLA_THRESHOLD_MS', '500'))
 DATA_DIR = os.getenv('DATA_DIR', '/data')
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+MODEL_IO_MB = int(os.getenv('MODEL_IO_MB', '10'))
+GRAPH_IO_MB = int(os.getenv('GRAPH_IO_MB', '20'))
 
 # Prometheus metrics
 REQUEST_COUNT = Counter(
@@ -119,8 +121,8 @@ def predict():
 
         logger.info("Processing transaction: %s", transaction_id)
 
-        model_load_time = simulate_disk_io(50)
-        graph_load_time = simulate_disk_io(100)
+        model_load_time = simulate_disk_io(MODEL_IO_MB)
+        graph_load_time = simulate_disk_io(GRAPH_IO_MB)
         compute_time = simulate_gnn_inference()
 
         fraud_score = random.uniform(0, 1)

@@ -9,8 +9,13 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 NAMESPACE="fraud-detection"
-REQUESTS_PER_SECOND=10
 DURATION_SECONDS=300
+BASELINE_RPS=1
+BASELINE_WORKERS=2
+BASELINE_LAT_SCALE=5
+CONTENT_RPS=6
+CONTENT_WORKERS=6
+CONTENT_LAT_SCALE=5
 RESULTS_DIR="experiment-results-$(date +%Y%m%d-%H%M%S)"
 
 log_header() {
@@ -25,7 +30,8 @@ log_header() {
     echo ""
     echo "Configuration:"
     echo "  Duration: ${DURATION_SECONDS}s per scenario"
-    echo "  Load: ${REQUESTS_PER_SECOND} requests/sec"
+    echo "  Baseline load: ${BASELINE_RPS} req/s (max ${BASELINE_WORKERS} workers)"
+    echo "  Contention load: ${CONTENT_RPS} req/s (max ${CONTENT_WORKERS} workers)"
     echo "  Results directory: ${RESULTS_DIR}"
     echo ""
 }
@@ -58,10 +64,15 @@ wait_for_stabilization() {
 run_load_test() {
     local label="$1"
     local output="$2"
-    echo "Starting load test for ${label} (${DURATION_SECONDS}s)..."
+    local rps="$3"
+    local workers="$4"
+    local scale="$5"
+    echo "Starting load test for ${label} (${DURATION_SECONDS}s, ${rps} rps, ${workers} workers, scale ${scale})..."
     python3 scripts/load-generator.py \
         --url "http://$SERVICE_URL" \
-        --rps "$REQUESTS_PER_SECOND" \
+        --rps "$rps" \
+        --max-workers "$workers" \
+        --latency-scale "$scale" \
         --duration "$DURATION_SECONDS" \
         --output "$output"
     echo ""
@@ -132,7 +143,7 @@ if ! kubectl get daemonset drcio-controller -n "$NAMESPACE" >/dev/null 2>&1; the
 fi
 wait_for_stabilization 30
 
-run_load_test "Scenario 1 (Baseline)" "$RESULTS_DIR/scenario1-baseline.csv"
+run_load_test "Scenario 1 (Baseline)" "$RESULTS_DIR/scenario1-baseline.csv" "$BASELINE_RPS" "$BASELINE_WORKERS" "$BASELINE_LAT_SCALE"
 echo "Exporting Prometheus metrics..."
 export_metrics "Scenario 1" "$RESULTS_DIR/scenario1-metrics.json"
 wait_for_stabilization 20
@@ -146,7 +157,7 @@ echo "Starting LP batch job..."
 kubectl apply -f kubernetes/workloads/lp-job.yaml
 wait_for_stabilization 45
 
-run_load_test "Scenario 2 (No DRC-IO)" "$RESULTS_DIR/scenario2-no-drcio.csv"
+run_load_test "Scenario 2 (No DRC-IO)" "$RESULTS_DIR/scenario2-no-drcio.csv" "$CONTENT_RPS" "$CONTENT_WORKERS" "$CONTENT_LAT_SCALE"
 echo "Exporting Prometheus metrics..."
 export_metrics "Scenario 2" "$RESULTS_DIR/scenario2-metrics.json"
 
@@ -156,7 +167,7 @@ echo "Re-enabling DRC-IO controller..."
 kubectl scale daemonset drcio-controller --replicas=1 -n "$NAMESPACE"
 wait_for_stabilization 30
 
-run_load_test "Scenario 3 (With DRC-IO)" "$RESULTS_DIR/scenario3-with-drcio.csv"
+run_load_test "Scenario 3 (With DRC-IO)" "$RESULTS_DIR/scenario3-with-drcio.csv" "$CONTENT_RPS" "$CONTENT_WORKERS" "$CONTENT_LAT_SCALE"
 echo "Exporting Prometheus metrics..."
 export_metrics "Scenario 3" "$RESULTS_DIR/scenario3-metrics.json"
 

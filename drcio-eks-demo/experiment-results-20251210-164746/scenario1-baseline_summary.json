@@ -1,0 +1,15 @@
+{
+  "total_requests": 299,
+  "successful": 299,
+  "errors": 0,
+  "mean_latency_ms": 473.2363383506852,
+  "median_latency_ms": 477.53095626831055,
+  "p95_latency_ms": 502.90961265563965,
+  "p99_latency_ms": 513.0475997924805,
+  "max_latency_ms": 517.8141593933105,
+  "min_latency_ms": 128.8033962249756,
+  "stddev_ms": 41.9099687940283,
+  "sla_violations": 20,
+  "sla_violation_rate": 6.688963210702341,
+  "output_file": "experiment-results-20251210-164746/scenario1-baseline.csv"
+}

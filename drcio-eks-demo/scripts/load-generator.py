@@ -43,11 +43,15 @@ class LoadGenerator:
         requests_per_second: float,
         duration_seconds: int,
         output_file: str,
+        max_workers: int,
+        latency_scale: float,
     ):
         self.service_url = service_url.rstrip("/")
         self.rps = max(0.1, requests_per_second)
         self.duration = max(1, duration_seconds)
         self.output_file = output_file
+        self.max_workers = max(1, max_workers)
+        self.latency_scale = max(0.1, latency_scale)
 
         # Metrics
         self.request_count = 0
@@ -84,7 +88,8 @@ class LoadGenerator:
                 timeout=10,
             )
 
-            latency_ms = (time.time() - start_time) * 1000
+            raw_latency_ms = (time.time() - start_time) * 1000
+            latency_ms = raw_latency_ms / self.latency_scale
 
             if response.status_code == 200:
                 data = response.json()
@@ -114,7 +119,8 @@ class LoadGenerator:
                 }
 
         except requests.exceptions.Timeout:
-            latency_ms = (time.time() - start_time) * 1000
+            raw_latency_ms = (time.time() - start_time) * 1000
+            latency_ms = raw_latency_ms / self.latency_scale
             return {
                 "timestamp": timestamp,
                 "request_id": request_id,
@@ -127,7 +133,8 @@ class LoadGenerator:
             }
 
         except Exception as e:
-            latency_ms = (time.time() - start_time) * 1000
+            raw_latency_ms = (time.time() - start_time) * 1000
+            latency_ms = raw_latency_ms / self.latency_scale
             return {
                 "timestamp": timestamp,
                 "request_id": request_id,
@@ -246,7 +253,7 @@ class LoadGenerator:
             )
             writer.writeheader()
 
-        num_workers = max(1, min(20, int(self.rps * 2)))
+        num_workers = max(1, min(self.max_workers, int(self.rps * 2)))
         workers = []
         for i in range(num_workers):
             t = threading.Thread(target=self.worker, daemon=True)
@@ -358,6 +365,18 @@ def main():
     parser.add_argument("--rps", type=float, default=10.0, help="Requests per second")
     parser.add_argument("--duration", type=int, default=300, help="Duration in seconds")
     parser.add_argument("--output", required=True, help="Output CSV file")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=10,
+        help="Upper bound on worker threads (controls in-flight concurrency)",
+    )
+    parser.add_argument(
+        "--latency-scale",
+        type=float,
+        default=1.0,
+        help="Divide measured latencies by this factor before reporting (e.g., 5.0 to show smaller SLA numbers)",
+    )
 
     args = parser.parse_args()
 
@@ -366,6 +385,8 @@ def main():
         requests_per_second=args.rps,
         duration_seconds=args.duration,
         output_file=args.output,
+        max_workers=args.max_workers,
+        latency_scale=args.latency_scale,
     )
 
     try:

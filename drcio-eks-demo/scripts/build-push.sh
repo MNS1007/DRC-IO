@@ -8,6 +8,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
 # Configuration
 export AWS_REGION="us-east-1"
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -73,10 +76,10 @@ create_repos() {
 
 build_hp_service() {
     echo -e "${YELLOW}[4/6]${NC} Building HP Service (GNN Fraud Detection)..."
-    pushd docker/hp-service > /dev/null
+    pushd "$REPO_ROOT/docker/hp-service" > /dev/null
 
     echo "  Building Docker image..."
-    docker build -t "${ECR_REGISTRY}/hp-service:${IMAGE_TAG}" . --no-cache
+    docker build --platform linux/amd64 -t "${ECR_REGISTRY}/hp-service:${IMAGE_TAG}" . --no-cache
 
     echo "  Pushing to ECR..."
     docker push "${ECR_REGISTRY}/hp-service:${IMAGE_TAG}"
@@ -91,10 +94,10 @@ build_hp_service() {
 
 build_lp_batch() {
     echo -e "${YELLOW}[5/6]${NC} Building LP Batch Job (I/O Stress)..."
-    pushd docker/lp-batch > /dev/null
+    pushd "$REPO_ROOT/docker/lp-batch" > /dev/null
 
     echo "  Building Docker image..."
-    docker build -t "${ECR_REGISTRY}/lp-batch:${IMAGE_TAG}" . --no-cache
+    docker build --platform linux/amd64 -t "${ECR_REGISTRY}/lp-batch:${IMAGE_TAG}" . --no-cache
 
     echo "  Pushing to ECR..."
     docker push "${ECR_REGISTRY}/lp-batch:${IMAGE_TAG}"
@@ -109,10 +112,10 @@ build_lp_batch() {
 
 build_drcio() {
     echo -e "${YELLOW}[6/6]${NC} Building DRC-IO Controller..."
-    pushd docker/drcio > /dev/null
+    pushd "$REPO_ROOT/docker/drcio" > /dev/null
 
     echo "  Building Docker image..."
-    docker build -t "${ECR_REGISTRY}/drcio-controller:${IMAGE_TAG}" . --no-cache
+    docker build --platform linux/amd64 -t "${ECR_REGISTRY}/drcio-controller:${IMAGE_TAG}" . --no-cache
 
     echo "  Pushing to ECR..."
     docker push "${ECR_REGISTRY}/drcio-controller:${IMAGE_TAG}"
@@ -128,17 +131,17 @@ build_drcio() {
 update_manifests() {
     echo "Updating Kubernetes manifests with image URIs..."
 
-    find kubernetes/ -name "*.yaml" -type f | while read -r file; do
+    find "$REPO_ROOT/kubernetes" -name "*.yaml" -type f | while read -r file; do
         sed -i.bak "s|IMAGE_REGISTRY|${ECR_REGISTRY}|g" "$file"
         sed -i.bak "s|IMAGE_TAG|${IMAGE_TAG}|g" "$file"
     done
 
-    find kubernetes/ -name "*.yaml.bak" -delete
+    find "$REPO_ROOT/kubernetes" -name "*.yaml.bak" -delete
     echo -e "${GREEN}✓ Manifests updated${NC}"
 }
 
 save_build_info() {
-    cat > build-info.txt <<EOF
+    cat > "$REPO_ROOT/build-info.txt" <<EOF
 Docker Build Information
 ========================
 

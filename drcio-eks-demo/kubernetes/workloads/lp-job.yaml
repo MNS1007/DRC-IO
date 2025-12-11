@@ -21,7 +21,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: stress
-        image: IMAGE_REGISTRY/lp-batch:IMAGE_TAG
+        image: 320658617028.dkr.ecr.us-east-1.amazonaws.com/lp-batch:v1.0.0
         imagePullPolicy: Always
         env:
         - name: IO_INTENSITY

@@ -26,7 +26,7 @@ spec:
     spec:
       containers:
       - name: gnn
-        image: IMAGE_REGISTRY/hp-service:IMAGE_TAG
+        image: 320658617028.dkr.ecr.us-east-1.amazonaws.com/hp-service:v1.0.0
         imagePullPolicy: Always
         ports:
         - containerPort: 8000

@@ -139,7 +139,6 @@ grafana:
           type: prometheus
           url: http://prometheus-kube-prometheus-prometheus:9090
           access: proxy
-          isDefault: true
           jsonData:
             timeInterval: 15s
 

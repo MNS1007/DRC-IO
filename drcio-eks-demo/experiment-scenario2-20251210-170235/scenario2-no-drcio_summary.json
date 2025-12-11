@@ -1,0 +1,15 @@
+{
+  "total_requests": 1570,
+  "successful": 870,
+  "errors": 700,
+  "mean_latency_ms": 1191.3183119342584,
+  "median_latency_ms": 1331.5907716751099,
+  "p95_latency_ms": 2003.656005859375,
+  "p99_latency_ms": 5236.849212646484,
+  "max_latency_ms": 20920.833444595337,
+  "min_latency_ms": 0.22764205932617188,
+  "stddev_ms": 1922.8840194188222,
+  "sla_violations": 1567,
+  "sla_violation_rate": 99.80891719745223,
+  "output_file": "experiment-scenario2-20251210-170235/scenario2-no-drcio.csv"
+}
