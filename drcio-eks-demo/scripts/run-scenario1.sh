@@ -1,23 +1,39 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCENARIO_DIR=${1:-"experiment-scenario1-$(date +%Y%m%d-%H%M%S)"}
 mkdir -p "$SCENARIO_DIR"
 
 NAMESPACE="fraud-detection"
-SERVICE_URL=$(kubectl get svc gnn-service -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+DURATION_SECONDS=300
+BASELINE_RPS=1
+BASELINE_WORKERS=2
+BASELINE_LAT_SCALE=5
 
-rps=1
-workers=2
-scale=5
+echo "Retrieving HP service URL..."
+SERVICE_URL=$(kubectl get svc gnn-service -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+if [[ -z "$SERVICE_URL" ]]; then
+  echo "Error: Unable to determine LoadBalancer hostname for gnn-service in namespace $NAMESPACE"
+  exit 1
+fi
+echo "Service URL: http://$SERVICE_URL"
+echo ""
+
+echo "Ensuring LP batch job is not running..."
+kubectl delete job batch-stress -n "$NAMESPACE" >/dev/null 2>&1 || true
 
 echo "Running Scenario 1 (Baseline) -> $SCENARIO_DIR"
-python3 scripts/load-generator.py \
+python3 "$SCRIPT_DIR/load-generator.py" \
   --url "http://$SERVICE_URL" \
-  --rps "$rps" \
-  --max-workers "$workers" \
-  --latency-scale "$scale" \
-  --duration 300 \
+  --rps "$BASELINE_RPS" \
+  --max-workers "$BASELINE_WORKERS" \
+  --latency-scale "$BASELINE_LAT_SCALE" \
+  --duration "$DURATION_SECONDS" \
   --output "$SCENARIO_DIR/scenario1-baseline.csv"
 
-python3 scripts/export-prometheus.py --duration 300 --output "$SCENARIO_DIR/scenario1-metrics.json"
+if [[ -f "$SCRIPT_DIR/export-prometheus.py" ]]; then
+  python3 "$SCRIPT_DIR/export-prometheus.py" --duration "$DURATION_SECONDS" --output "$SCENARIO_DIR/scenario1-metrics.json"
+else
+  echo "Warning: export-prometheus.py not found; skipping metrics export"
+fi

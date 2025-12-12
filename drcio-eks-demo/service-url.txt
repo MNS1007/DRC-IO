@@ -1,1 +1,0 @@
-a470ed3e7aa2f4ffd8928fac1ac454fe-478668699.us-east-1.elb.amazonaws.com

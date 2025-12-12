@@ -4,10 +4,88 @@ Export Prometheus metrics for DRC-IO experiments
 """
 
 import argparse
-import requests
+import contextlib
 import json
+import os
+import shutil
+import socket
+import subprocess
 import time
 from datetime import datetime
+from typing import Optional
+
+import requests
+
+
+class KubectlPortForward(contextlib.AbstractContextManager):
+    """Manage a kubectl port-forward session for reaching Prometheus."""
+
+    def __init__(
+        self,
+        namespace: str,
+        service: str,
+        remote_port: int,
+        local_port: int = 0,
+        timeout: int = 20,
+    ):
+        self.namespace = namespace
+        self.service = service
+        self.remote_port = remote_port
+        self.local_port = local_port
+        self.timeout = timeout
+        self.process = None
+
+    @staticmethod
+    def _find_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _is_port_open(self) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            return sock.connect_ex(("127.0.0.1", self.local_port)) == 0
+
+    def __enter__(self):
+        if not shutil.which("kubectl"):
+            raise RuntimeError(
+                "kubectl is required for port-forwarding but was not found in PATH"
+            )
+
+        if self.local_port == 0:
+            self.local_port = self._find_free_port()
+
+        cmd = [
+            "kubectl",
+            "-n",
+            self.namespace,
+            "port-forward",
+            f"svc/{self.service}",
+            f"{self.local_port}:{self.remote_port}",
+        ]
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        deadline = time.time() + self.timeout
+        while time.time() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError("kubectl port-forward exited before becoming ready")
+            if self._is_port_open():
+                return self.local_port
+            time.sleep(0.5)
+
+        raise RuntimeError("Timed out waiting for kubectl port-forward to become ready")
+
+    def __exit__(self, exc_type, exc, exc_tb):
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
 
 
 class PrometheusExporter:
@@ -256,12 +334,49 @@ sum(increase(drcio_adjustments_total{{
             print()
 
 
+def resolve_prometheus_url(cli_url: Optional[str]) -> Optional[str]:
+    """Choose the Prometheus endpoint from CLI args or environment."""
+    if cli_url:
+        return cli_url.rstrip("/")
+    env_url = os.getenv("PROMETHEUS_URL") or os.getenv("PROM_URL")
+    if env_url:
+        return env_url.rstrip("/")
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export Prometheus metrics")
     parser.add_argument(
         "--prometheus-url",
-        default="http://localhost:9090",
-        help="Prometheus URL",
+        default=None,
+        help="Prometheus URL (overrides PROMETHEUS_URL env)",
+    )
+    parser.add_argument(
+        "--use-kubectl-port-forward",
+        action="store_true",
+        help="Automatically port-forward to Prometheus if it is only reachable inside the cluster",
+    )
+    parser.add_argument(
+        "--monitoring-namespace",
+        default="monitoring",
+        help="Namespace that hosts the Prometheus service",
+    )
+    parser.add_argument(
+        "--prometheus-service",
+        default="prometheus-kube-prometheus-prometheus",
+        help="Prometheus service name to port-forward",
+    )
+    parser.add_argument(
+        "--prometheus-service-port",
+        type=int,
+        default=9090,
+        help="Remote Prometheus service port",
+    )
+    parser.add_argument(
+        "--prometheus-local-port",
+        type=int,
+        default=0,
+        help="Local port to bind when port-forwarding (0 = auto pick)",
     )
     parser.add_argument(
         "--duration", type=int, required=True, help="Duration in seconds to export"
@@ -274,8 +389,40 @@ def main():
 
     args = parser.parse_args()
 
-    exporter = PrometheusExporter(args.prometheus_url)
-    exporter.export_experiment_metrics(args.duration, args.output)
+    prometheus_url = resolve_prometheus_url(args.prometheus_url)
+    port_forward_cm = contextlib.nullcontext()
+
+    if args.use_kubectl_port_forward:
+        port_forward_cm = KubectlPortForward(
+            namespace=args.monitoring_namespace,
+            service=args.prometheus_service,
+            remote_port=args.prometheus_service_port,
+            local_port=args.prometheus_local_port,
+        )
+
+    if not prometheus_url and not args.use_kubectl_port_forward:
+        prometheus_url = "http://localhost:9090"
+
+    try:
+        with port_forward_cm as forwarded_port:
+            if args.use_kubectl_port_forward:
+                prometheus_url = f"http://127.0.0.1:{forwarded_port}"
+                print(
+                    f"Established kubectl port-forward to {args.prometheus_service} "
+                    f"on {prometheus_url}"
+                )
+
+            if not prometheus_url:
+                raise RuntimeError(
+                    "Unable to determine Prometheus URL. Specify --prometheus-url, set "
+                    "PROMETHEUS_URL, or enable --use-kubectl-port-forward."
+                )
+
+            exporter = PrometheusExporter(prometheus_url)
+            exporter.export_experiment_metrics(args.duration, args.output)
+    except RuntimeError as err:
+        print(f"Error: {err}")
+        raise SystemExit(1) from err
 
 
 if __name__ == "__main__":
