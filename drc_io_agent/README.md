@@ -1,6 +1,6 @@
 # DRC I/O Agent
 
-Dynamic Resource Controller for Input and Output Scheduling (Node Agent)
+Dynamic Resource Controller for Input and Output Scheduling (Node Agent), fix.
 
 ## Overview
 
