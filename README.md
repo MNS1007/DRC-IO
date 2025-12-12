@@ -16,7 +16,7 @@ Minimal instructions to deploy the demo workloads, run the three DRC-IO scenario
 ./scripts/deploy-all.sh
 ```
 
-Provisioning from scratch? `./infrastructure/setup.sh` bootstraps the EKS cluster plus kube-prometheus-stack; run it once before the steps above.
+Provisioning from scratch? `./infrastructure/setup.sh` bootstraps the EKS cluster plus kube-prometheus-stack; run it once before the steps above. When you’re finished with the demo environment, tear it down via `./infrastructure/cleanup.sh`.
 
 ## 2. Run the Scenarios
 ```bash
