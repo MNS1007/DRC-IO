@@ -11,12 +11,18 @@ The EKS cluster, HP/LP workloads, DRC-IO controller, and monitoring stack are al
 
 ### B. Dockerized Test Harness
 ```bash
+git clone https://github.com/your-org/drcio-eks-demo.git drcio-eks-demo
+cd drcio-eks-demo
 ./run-in-docker.sh ./scripts/run-scenario1.sh
 ./run-in-docker.sh ./scripts/run-scenario2.sh
 ./run-in-docker.sh ./scripts/run-scenario3.sh
 ```
-`run-in-docker.sh` builds the `Dockerfile.runner` image (Python, kubectl 1.34, Helm 3.14, aws-cli, jq, pandas/numpy/matplotlib/seaborn, etc.) and mounts your host kubeconfig/AWS credentials so the scripts can talk to the live cluster. Set `DRCIO_SKIP_BUILD=1` after the first build to skip rebuilding.
-If Docker isn’t available, install kubectl ≥1.28, awscli ≥2.10, Helm ≥3.14 locally and follow the manual steps below.
+`run-in-docker.sh` builds the `Dockerfile.runner` image (Python, kubectl 1.34, Helm 3.14, aws-cli, jq, pandas/numpy/matplotlib/seaborn, etc.), mounts your host kubeconfig/AWS credentials, and runs each scenario. Export your AWS creds with:
+```bash
+aws configure --profile drc-eval        # use the access key/secret we submitted
+export AWS_PROFILE=drc-eval
+```
+If Docker isn’t available, install kubectl ≥1.28, awscli ≥2.10, Helm ≥3.14 locally and follow the manual steps below (same scenario scripts, no `run-experiments.sh`).
 
 ### C. Manual Run (if you prefer host tools)
 ```bash
@@ -38,9 +44,13 @@ Running them individually guarantees a clean slate for each step and mirrors how
 **Heads up:** the entire setup was compressed to keep grading simple; occasionally the scripts may still fail (usually due to AWS credentials or EBS CSI driver resets). If anything refuses to run after following the steps above, email nithin@example.com with the console output and we will fix it immediately.
 
 - A fresh `experiment-results-20251212-214354/` directory is checked in with the exact CSV/metrics/logs we captured right before submission so you can cross-verify the plots.
-- CloudWatch access: IAM user `fraud-eval` (include this comment when you grade: `# IAM User: fraud-eval (arn:aws:iam::320658617028:user/fraud-eval)`). It grants read-only access to `/aws/eks/drcio-demo/workloads` logs and Container Insights dashboards.
-
-- AWS Console/API login: use the IAM user shared with this submission (Access Key / Secret Key labeled `fraud-eval`). `aws configure --profile drc-eval` → enter the key pair we supplied, then set `AWS_PROFILE=drc-eval` before running scripts or the Docker harness.
+- CloudWatch access: include the comment `# IAM User: nithin10 (arn:aws:iam::320658617028:user/nithin10)` when grading; it unlocks `/aws/eks/drcio-demo/workloads` logs and Container Insights dashboards.
+- AWS Console/API login: configure the provided IAM user using:
+  ```bash
+  aws configure --profile drc-eval     # Access Key / Secret Key supplied separately
+  export AWS_PROFILE=drc-eval
+  ```
+  (Contact: nithin10@umd.edu for any credential issues.)
 
 ### E. Capturing DRC-IO io.weight plot (Fig. 6)
 1. After `./scripts/run-experiments.sh` completes, keep Scenario 3 data (or rerun `./scripts/run-scenario3.sh`).
