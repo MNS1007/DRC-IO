@@ -7,9 +7,9 @@ SCENARIO_DIR=${1:-"experiment-scenario3-$(date +%Y%m%d-%H%M%S)"}
 mkdir -p "$SCENARIO_DIR"
 NAMESPACE="fraud-detection"
 DURATION_SECONDS=300
-CONTENT_RPS=6
-CONTENT_WORKERS=6
-CONTENT_LAT_SCALE=15
+CONTENT_RPS=10
+CONTENT_WORKERS=10
+CONTENT_LAT_SCALE=5
 LP_JOB_MANIFEST="$REPO_ROOT/kubernetes/workloads/lp-job.yaml"
 if [[ ! -f "$LP_JOB_MANIFEST" ]]; then
   echo "Error: LP job manifest not found at $LP_JOB_MANIFEST"

@@ -1,0 +1,38 @@
+FROM python:3.11-slim
+
+ARG KUBECTL_VERSION=v1.34.2
+ARG HELM_VERSION=v3.14.4
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/root/.local/bin:$PATH"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    tar \
+    unzip \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSLo /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && chmod +x /usr/local/bin/kubectl
+
+RUN curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o /tmp/helm.tgz \
+    && tar -xzf /tmp/helm.tgz -C /tmp linux-amd64/helm \
+    && mv /tmp/linux-amd64/helm /usr/local/bin/helm \
+    && chmod +x /usr/local/bin/helm \
+    && rm -rf /tmp/helm.tgz /tmp/linux-amd64
+
+RUN pip install --no-cache-dir awscli==1.33.33
+
+RUN pip install --no-cache-dir \
+      pandas==2.2.3 \
+      numpy==2.1.2 \
+      matplotlib==3.9.2 \
+      seaborn==0.13.2 \
+      requests==2.32.3 \
+      kubernetes==29.0.0 \
+      prometheus-client==0.20.0
+
+WORKDIR /workspace

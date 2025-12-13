@@ -28,6 +28,7 @@ NC='\033[0m' # No Color
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+MONITORING_READY=0
 
 # Configuration
 CLUSTER_NAME="drcio-demo"
@@ -189,6 +190,11 @@ update_kubeconfig() {
 install_metrics_server() {
     log_section "Installing Metrics Server"
 
+    if kubectl get deployment metrics-server -n kube-system >/dev/null 2>&1; then
+        log_info "metrics-server already deployed; skipping reinstall"
+        return
+    fi
+
     log_info "Deploying metrics-server..."
     kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
 
@@ -322,14 +328,20 @@ print_summary() {
     echo "   Region:  $REGION"
     echo "   Version: 1.28"
     echo ""
-    echo "🔗 Access URLs:"
-    echo "   Grafana:    http://localhost:3000"
-    echo "   Prometheus: http://localhost:9090"
-    echo ""
-    echo "🔐 Grafana Credentials:"
-    echo "   Username: admin"
-    echo "   Password: $grafana_password"
-    echo "   (saved to: infrastructure/grafana-password.txt)"
+    echo "🔗 Monitoring Access:"
+    if [ "$MONITORING_READY" -eq 1 ]; then
+        echo "   Grafana:    http://localhost:3000"
+        echo "   Prometheus: http://localhost:9090"
+        echo ""
+        echo "🔐 Grafana Credentials:"
+        echo "   Username: admin"
+        echo "   Password: $grafana_password"
+        echo "   (saved to: infrastructure/grafana-password.txt)"
+    else
+        echo "   Monitoring stack not installed. After running ./infrastructure/fix-ebs-csi.sh, rerun:" 
+        echo "     helm upgrade --install prometheus prometheus-community/kube-prometheus-stack"
+        echo "       -n monitoring -f kubernetes/monitoring/prometheus-values.yaml --wait --timeout 15m"
+    fi
     echo ""
     echo "📝 Next Steps:"
     echo "   1. Build and push Docker images:"
@@ -375,10 +387,30 @@ main() {
     check_prerequisites
     create_eks_cluster
     update_kubeconfig
+    log_section "Ensuring EBS CSI Driver is ready"
+    set +e
+    "$SCRIPT_DIR/fix-ebs-csi.sh"
+    FIX_STATUS=$?
+    set -e
+    if [ $FIX_STATUS -ne 0 ]; then
+        log_warning "Automatic EBS CSI setup reported issues; continuing regardless."
+    fi
+
     install_metrics_server
+    set +e
     install_prometheus_stack
-    setup_grafana_credentials
-    setup_port_forwards
+    INSTALL_STATUS=$?
+    set -e
+    if [ $INSTALL_STATUS -ne 0 ]; then
+        log_warning "Monitoring stack installation failed (often due to the EBS CSI driver)."
+        log_warning "Run ./infrastructure/fix-ebs-csi.sh, then rerun the monitoring install via:"
+        log_warning "  helm upgrade --install prometheus prometheus-community/kube-prometheus-stack"
+        log_warning "    -n monitoring -f kubernetes/monitoring/prometheus-values.yaml --wait --timeout 15m"
+    else
+        MONITORING_READY=1
+        setup_grafana_credentials
+        setup_port_forwards
+    fi
     verify_installation
     print_summary
 }

@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NAMESPACE="${NAMESPACE:-monitoring}"
 PROM_SERVICE="${PROM_SERVICE:-prometheus-kube-prometheus-prometheus}"
-GRAF_SERVICE="${GRAF_SERVICE:-kube-prometheus-stack-grafana}"
+GRAF_SERVICE="${GRAF_SERVICE:-prometheus-grafana}"
 PROM_LOCAL_PORT="${PROM_LOCAL_PORT:-9090}"
 PROM_REMOTE_PORT="${PROM_REMOTE_PORT:-9090}"
 GRAF_LOCAL_PORT="${GRAF_LOCAL_PORT:-3000}"

@@ -153,13 +153,17 @@ create_service_account() {
 
     log_info "Checking if service account exists..."
 
-    # Check if service account already exists
+    local SA_EXISTS=0
+
     if eksctl get iamserviceaccount \
         --cluster "$CLUSTER_NAME" \
         --region "$REGION" \
         --name "$SERVICE_ACCOUNT_NAME" \
         --namespace kube-system 2>/dev/null | grep -q "$SERVICE_ACCOUNT_NAME"; then
+        SA_EXISTS=1
+    fi
 
+    if [ $SA_EXISTS -eq 1 ]; then
         log_warning "Service account already exists, deleting to recreate..."
 
         eksctl delete iamserviceaccount \
@@ -171,6 +175,7 @@ create_service_account() {
 
         # Wait a bit for deletion to complete
         sleep 5
+        kubectl delete serviceaccount "$SERVICE_ACCOUNT_NAME" -n kube-system --ignore-not-found >/dev/null 2>&1 || true
     fi
 
     log_info "Creating IAM service account with EBS CSI driver policy..."
@@ -185,22 +190,72 @@ create_service_account() {
         --override-existing-serviceaccounts
 
     log_success "IAM service account created"
+    kubectl patch serviceaccount "$SERVICE_ACCOUNT_NAME" -n kube-system \
+        --type merge -p '{"metadata":{"labels":{"app.kubernetes.io/managed-by":null}}}' >/dev/null 2>&1 || true
 }
 
 ##############################################################################
 # EBS CSI Driver Addon Installation
 ##############################################################################
 
+describe_addon_health() {
+    aws eks describe-addon \
+        --cluster-name "$CLUSTER_NAME" \
+        --region "$REGION" \
+        --addon-name aws-ebs-csi-driver \
+        --query 'addon.health.issues' \
+        --output json 2>/dev/null || echo "[]"
+}
+
+get_cluster_version() {
+    aws eks describe-cluster \
+        --name "$CLUSTER_NAME" \
+        --region "$REGION" \
+        --query 'cluster.version' \
+        --output text
+}
+
+get_latest_addon_version() {
+    local cluster_version="$1"
+    aws eks describe-addon-versions \
+        --addon-name aws-ebs-csi-driver \
+        --kubernetes-version "$cluster_version" \
+        --query 'addons[0].addonVersions[0].addonVersion' \
+        --output text 2>/dev/null
+}
+
+get_addon_status() {
+    aws eks describe-addon \
+        --cluster-name "$CLUSTER_NAME" \
+        --region "$REGION" \
+        --addon-name aws-ebs-csi-driver \
+        --query 'addon.status' \
+        --output text 2>/dev/null || echo "NOT_FOUND"
+}
+
 install_ebs_csi_addon() {
     log_section "Installing/Updating EBS CSI Driver Addon"
 
-    # Get service account role ARN
-    log_info "Retrieving service account role ARN..."
+    local cluster_version
+    cluster_version=$(get_cluster_version)
+    log_info "Cluster Kubernetes version: $cluster_version"
 
+    local addon_version="${ADDON_VERSION_OVERRIDE:-}"
+    if [ -z "$addon_version" ] || [ "$addon_version" = "None" ]; then
+        addon_version=$(get_latest_addon_version "$cluster_version")
+    fi
+
+    if [ -z "$addon_version" ] || [ "$addon_version" = "None" ]; then
+        log_warning "Unable to determine addon version automatically; letting AWS choose the default"
+    else
+        log_info "Using aws-ebs-csi-driver addon version: $addon_version"
+    fi
+
+    log_info "Retrieving service account role ARN..."
+    local ROLE_ARN
     ROLE_ARN=$(aws iam list-roles --query "Roles[?RoleName=='eksctl-${CLUSTER_NAME}-addon-iamserviceaccount-ku-Role1-*'].Arn" --output text 2>/dev/null || echo "")
 
     if [ -z "$ROLE_ARN" ]; then
-        # Try alternate method
         ROLE_ARN=$(eksctl get iamserviceaccount \
             --cluster "$CLUSTER_NAME" \
             --region "$REGION" \
@@ -209,75 +264,113 @@ install_ebs_csi_addon() {
             -o json 2>/dev/null | jq -r '.[0].status.roleARN' || echo "")
     fi
 
-    if [ -z "$ROLE_ARN" ] || [ "$ROLE_ARN" = "null" ]; then
-        log_warning "Could not retrieve role ARN automatically"
-        log_info "Installing addon without explicit role ARN..."
-    else
+    local role_args=()
+    if [ -n "$ROLE_ARN" ] && [ "$ROLE_ARN" != "null" ]; then
         log_success "Role ARN: $ROLE_ARN"
+        role_args=(--service-account-role-arn "$ROLE_ARN")
+    else
+        log_warning "Could not retrieve role ARN automatically; continuing without explicit role"
     fi
 
-    # Check if addon already exists
-    log_info "Checking if EBS CSI addon is installed..."
+    local addon_version_args=()
+    if [ -n "$addon_version" ] && [ "$addon_version" != "None" ]; then
+        addon_version_args=(--addon-version "$addon_version")
+    fi
 
+    local create_or_update="create"
+
+    log_info "Checking if EBS CSI addon is installed..."
+    local addon_exists=0
     if aws eks describe-addon \
         --cluster-name "$CLUSTER_NAME" \
         --region "$REGION" \
         --addon-name aws-ebs-csi-driver &> /dev/null; then
-
-        log_warning "EBS CSI addon already exists, updating..."
-
-        if [ -n "$ROLE_ARN" ] && [ "$ROLE_ARN" != "null" ]; then
-            aws eks update-addon \
+        addon_exists=1
+        local existing_status
+        existing_status=$(get_addon_status)
+        if [ "$existing_status" = "CREATE_FAILED" ] || [ "$existing_status" = "UPDATE_FAILED" ]; then
+            log_warning "Existing addon is in state $existing_status; deleting before reinstall."
+            aws eks delete-addon \
                 --cluster-name "$CLUSTER_NAME" \
                 --region "$REGION" \
-                --addon-name aws-ebs-csi-driver \
-                --service-account-role-arn "$ROLE_ARN" \
-                --resolve-conflicts OVERWRITE
-        else
-            aws eks update-addon \
-                --cluster-name "$CLUSTER_NAME" \
-                --region "$REGION" \
-                --addon-name aws-ebs-csi-driver \
-                --resolve-conflicts OVERWRITE
+                --addon-name aws-ebs-csi-driver >/dev/null 2>&1 || true
+            for i in {1..20}; do
+                if aws eks describe-addon \
+                    --cluster-name "$CLUSTER_NAME" \
+                    --region "$REGION" \
+                    --addon-name aws-ebs-csi-driver >/dev/null 2>&1; then
+                    sleep 5
+                else
+                    addon_exists=0
+                    break
+                fi
+            done
+            log_info "Addon deletion completed; proceeding with fresh install."
         fi
+    fi
 
-        log_success "EBS CSI addon updated"
+    if [ "$addon_exists" -eq 1 ]; then
+        log_warning "EBS CSI addon already exists, updating..."
+        create_or_update="update"
+
+        aws eks update-addon \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --addon-name aws-ebs-csi-driver \
+            "${addon_version_args[@]}" \
+            "${role_args[@]}" \
+            --resolve-conflicts OVERWRITE
+
+        log_success "EBS CSI addon update initiated"
     else
         log_info "Installing EBS CSI addon..."
 
-        if [ -n "$ROLE_ARN" ] && [ "$ROLE_ARN" != "null" ]; then
-            aws eks create-addon \
-                --cluster-name "$CLUSTER_NAME" \
-                --region "$REGION" \
-                --addon-name aws-ebs-csi-driver \
-                --service-account-role-arn "$ROLE_ARN"
-        else
-            aws eks create-addon \
-                --cluster-name "$CLUSTER_NAME" \
-                --region "$REGION" \
-                --addon-name aws-ebs-csi-driver
-        fi
+        aws eks create-addon \
+            --cluster-name "$CLUSTER_NAME" \
+            --region "$REGION" \
+            --addon-name aws-ebs-csi-driver \
+            "${addon_version_args[@]}" \
+            "${role_args[@]}"
 
-        log_success "EBS CSI addon installed"
+        log_success "EBS CSI addon installation initiated"
     fi
 
-    # Wait for addon to be active
     log_info "Waiting for addon to become active (this may take 1-2 minutes)..."
-
+    local ADDON_STATUS=""
     for i in {1..24}; do
         ADDON_STATUS=$(aws eks describe-addon \
             --cluster-name "$CLUSTER_NAME" \
             --region "$REGION" \
             --addon-name aws-ebs-csi-driver \
             --query 'addon.status' \
-            --output text)
+            --output text 2>/dev/null || echo "UNKNOWN")
 
         if [ "$ADDON_STATUS" = "ACTIVE" ]; then
             log_success "EBS CSI addon is active"
             break
         elif [ "$ADDON_STATUS" = "CREATE_FAILED" ] || [ "$ADDON_STATUS" = "UPDATE_FAILED" ]; then
-            log_error "Addon installation/update failed with status: $ADDON_STATUS"
-            exit 1
+            log_error "Addon $create_or_update failed with status: $ADDON_STATUS"
+            log_info "AWS reported issues:"
+            describe_addon_health
+
+            log_info "Attempting forced reinstallation..."
+            aws eks delete-addon \
+                --cluster-name "$CLUSTER_NAME" \
+                --region "$REGION" \
+                --addon-name aws-ebs-csi-driver >/dev/null 2>&1 || true
+            sleep 10
+
+            aws eks create-addon \
+                --cluster-name "$CLUSTER_NAME" \
+                --region "$REGION" \
+                --addon-name aws-ebs-csi-driver \
+                "${addon_version_args[@]}" \
+                "${role_args[@]}"
+
+            log_info "Reinstall kicked off; waiting for ACTIVE state..."
+            create_or_update="create"
+            sleep 10
+            continue
         else
             echo -n "."
             sleep 5
@@ -288,6 +381,7 @@ install_ebs_csi_addon() {
         log_warning "Addon status: $ADDON_STATUS (may still be initializing)"
     fi
 }
+
 
 ##############################################################################
 # Verify EBS CSI Driver
@@ -336,10 +430,21 @@ verify_ebs_csi_driver() {
     log_info "Checking for gp2 StorageClass..."
 
     if kubectl get storageclass gp2 &> /dev/null; then
-        log_success "gp2 StorageClass exists"
+        current_prov=$(kubectl get storageclass gp2 -o jsonpath='{.provisioner}' 2>/dev/null)
+        if [ "$current_prov" != "ebs.csi.aws.com" ]; then
+            log_warning "gp2 StorageClass uses $current_prov; recreating with ebs.csi.aws.com"
+            kubectl delete storageclass gp2 >/dev/null 2>&1 || true
+            NEED_SC=1
+        else
+            log_success "gp2 StorageClass already uses ebs.csi.aws.com"
+            NEED_SC=0
+        fi
     else
         log_warning "gp2 StorageClass not found, creating..."
+        NEED_SC=1
+    fi
 
+    if [ "${NEED_SC:-0}" -eq 1 ]; then
         cat <<EOF | kubectl apply -f -
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -349,6 +454,7 @@ metadata:
     storageclass.kubernetes.io/is-default-class: "true"
 provisioner: ebs.csi.aws.com
 volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
 parameters:
   type: gp2
   fsType: ext4

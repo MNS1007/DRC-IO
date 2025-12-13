@@ -1,55 +1,105 @@
-# DRC-IO on EKS — Submission Guide
+# DRC-IO on EKS
 
-Minimal instructions to deploy the demo workloads, run the three DRC-IO scenarios, and package the required artifacts for submission.
+![DRC-IO Architecture](assets/architecture-diagram.png)
 
-## Requirements
-- `kubectl` connected to the target EKS cluster (cluster should already have the `fraud-detection` namespace and worker IAM permissions to create jobs/daemonsets).
-- `python3` with the standard library only (project code bundles everything else).
-- `helm` and `aws` CLI (only needed if you must provision the cluster or reinstall monitoring).
 
-## 1. Deploy/Refresh the Demo Stack
+## 1. TA Quick-Start (Cluster Pre-Provisioned)
+The EKS cluster, HP/LP workloads, DRC-IO controller, and monitoring stack are already running. You only need to verify access and run the experiments—no extra installs beyond Docker/kubectl/aws CLI.
+
+### A. Access Credentials & IAM
+- Use the kubeconfig + IAM user shared with the submission. If you hit auth failures, ping me (nithin@example.com) and mention the error—most issues are credential expiry or AWS EBS CSI driver reinstallation.
+
+### B. Dockerized Test Harness
 ```bash
-# Build/push images if you changed code (optional)
-./scripts/build-push.sh
-
-# Deploy HP service, LP job manifest, and the DRC-IO controller
-./scripts/deploy-all.sh
+./run-in-docker.sh ./scripts/run-scenario1.sh
+./run-in-docker.sh ./scripts/run-scenario2.sh
+./run-in-docker.sh ./scripts/run-scenario3.sh
 ```
+`run-in-docker.sh` builds the `Dockerfile.runner` image (Python, kubectl 1.34, Helm 3.14, aws-cli, jq, pandas/numpy/matplotlib/seaborn, etc.) and mounts your host kubeconfig/AWS credentials so the scripts can talk to the live cluster. Set `DRCIO_SKIP_BUILD=1` after the first build to skip rebuilding.
+If Docker isn’t available, install kubectl ≥1.28, awscli ≥2.10, Helm ≥3.14 locally and follow the manual steps below.
 
-Provisioning from scratch? `./infrastructure/setup.sh` bootstraps the EKS cluster plus kube-prometheus-stack; run it once before the steps above. When you’re finished with the demo environment, tear it down via `./infrastructure/cleanup.sh`.
-
-## 2. Run the Scenarios
+### C. Manual Run (if you prefer host tools)
 ```bash
-# Run all three scenarios with prompts and summaries
-./scripts/run-experiments.sh
-
-# or run them individually if you need to re-collect a specific dataset
-./scripts/run-scenario1.sh
-./scripts/run-scenario2.sh
-./scripts/run-scenario3.sh
+./scripts/port-forward-monitoring.sh   # Prometheus/Grafana UI (optional)
+./scripts/run-scenario1.sh             # Scenario 1 (Baseline)
+./scripts/run-scenario2.sh             # Scenario 2 (No DRC-IO)
+./scripts/run-scenario3.sh             # Scenario 3 (With DRC-IO)
 ```
-Outputs land in timestamped `experiment-results-*` folders (CSV request traces, Prometheus metrics, controller logs, and analysis reports).
+Running them individually guarantees a clean slate for each step and mirrors how we captured the report figures. If you want the bundled experience, run `./scripts/run-experiments.sh` after each scenario succeeds once. Results appear under `experiment-results-YYYYMMDD-HHMMSS/`. One complete directory is already checked in for reference.
 
-## 3. Export Metrics & Visualize (optional but recommended)
-```bash
-# Open Prometheus + Grafana locally
-./scripts/port-forward-monitoring.sh
+### D. Troubleshooting
+- If `run-experiments.sh` complains about monitoring or volumes, rerun:
+  ```bash
+  ./infrastructure/fix-ebs-csi.sh
+  helm upgrade --install prometheus prometheus-community/kube-prometheus-stack     -n monitoring -f kubernetes/monitoring/prometheus-values.yaml --wait --timeout 15m
+  ```
+  This repairs the AWS EBS CSI driver and rebinds the Grafana/Prom PVCs. Contact me if you still see `CREATE_FAILED` after that; it likely means the IAM role was rotated.
+- If Docker image pulls fail, use the host tooling path above.
+**Heads up:** the entire setup was compressed to keep grading simple; occasionally the scripts may still fail (usually due to AWS credentials or EBS CSI driver resets). If anything refuses to run after following the steps above, email nithin@example.com with the console output and we will fix it immediately.
 
-# Export metrics for any run (handles kubectl port-forward if needed)
-python3 ./scripts/export-prometheus.py \
-  --use-kubectl-port-forward \
-  --duration 300 \
-  --output experiment-results-YYYYMMDD-HHMMSS/scenario1-metrics.json
-```
-Grafana dashboards live under `dashboards/` and the CloudWatch agent manifest is at `kubernetes/monitoring/cloudwatch-agent.yaml` if you need AWS-side telemetry.
+- A fresh `experiment-results-20251212-214354/` directory is checked in with the exact CSV/metrics/logs we captured right before submission so you can cross-verify the plots.
+- CloudWatch access: IAM user `fraud-eval` (include this comment when you grade: `# IAM User: fraud-eval (arn:aws:iam::320658617028:user/fraud-eval)`). It grants read-only access to `/aws/eks/drcio-demo/workloads` logs and Container Insights dashboards.
 
-## 4. Submission Checklist
-1. Commit/push this repository to your public link **including one full `experiment-results-*` directory** that reproduces the demo graphs.
-2. Verify the code runs end-to-end without extra package installs (Python standard library only) and that `kubectl`/`helm`/`aws` CLIs are available in your environment.
-3. Include your IAM user or role comment when you submit, e.g.
+- AWS Console/API login: use the IAM user shared with this submission (Access Key / Secret Key labeled `fraud-eval`). `aws configure --profile drc-eval` → enter the key pair we supplied, then set `AWS_PROFILE=drc-eval` before running scripts or the Docker harness.
+
+### E. Capturing DRC-IO io.weight plot (Fig. 6)
+1. After `./scripts/run-experiments.sh` completes, keep Scenario 3 data (or rerun `./scripts/run-scenario3.sh`).
+2. Run `./scripts/port-forward-monitoring.sh` and open Grafana → *DRC-IO Overview* → panel `DRC-IO Controller: IO Weight` to view HP (blue) vs LP (orange) weights as in Fig. 6.
+3. For raw data, execute:
+   ```bash
+   python3 scripts/export-prometheus.py \
+     --use-kubectl-port-forward \
+     --duration 300 \
+     --output scenario3-metrics.json
    ```
-   # IAM User: fraud-eval (arn:aws:iam::123456789012:user/fraud-eval)
-   ```
-   Reviewer will use it to reach CloudWatch logs for validation.
+   This JSON contains `metrics.drcio_hp_weight` / `metrics.drcio_lp_weight` arrays for plotting.
+4. Empty plots usually mean monitoring was restarted; rerun `./infrastructure/fix-ebs-csi.sh` and retry.
 
-That’s it—everything else in the repo is self-contained. Reach out if you need tailored instructions for a different cluster layout or IAM model.
+![Scenario 3 – DRC-IO io.weight Adjustments](assets/scenario3-io-weights.png)
+
+## 2. Open-Source / Fresh Setup Guide
+For users cloning this repo who need to provision everything themselves.
+
+### Requirements
+- `kubectl`, `helm`, `aws` CLI, and `docker` installed locally.
+- AWS account with permissions to create EKS clusters, IAM roles, EBS volumes.
+
+### Step 1: Provision Infrastructure
+```bash
+cd infrastructure
+./setup.sh                # creates EKS, installs metrics-server & monitoring, sets up port-forwards
+```
+If monitoring pods stay Pending, run `./fix-ebs-csi.sh` (repairs the EBS CSI addon) and rerun the Helm command printed in the summary. Tear down with `./cleanup.sh` when finished.
+
+### Step 2: Build & Deploy Workloads
+```bash
+cd ..
+./scripts/build-push.sh   # build/push docker images (HP service, LP batch, DRC-IO controller)
+./scripts/deploy-all.sh   # deploy workloads + controller into fraud-detection namespace
+```
+
+### Step 3: Run Experiments
+```bash
+./scripts/run-scenario1.sh   # Baseline
+./scripts/run-scenario2.sh   # No DRC-IO
+./scripts/run-scenario3.sh   # With DRC-IO
+```
+After validating each scenario, you can optionally run `./scripts/run-experiments.sh` to automate the trio. Outputs (CSV + JSON metrics + logs + plots) land in `experiment-results-*`. The included Docker image (`public.ecr.aws/our-repo/drcio-eval:latest`) can run all scripts if you prefer containerized tooling.
+
+### Step 4: Monitoring & Metrics
+```bash
+./scripts/port-forward-monitoring.sh   # Grafana http://127.0.0.1:3000, Prometheus http://127.0.0.1:9090
+python3 scripts/export-prometheus.py --use-kubectl-port-forward --duration 300 --output metrics.json
+```
+Grafana dashboards live in `dashboards/`. CloudWatch agent manifests are under `kubernetes/monitoring/cloudwatch-agent.yaml` if you want AWS-side observability.
+
+To recreate the io.weight chart from Scenario 3, follow the same Grafana steps as above or run `scripts/export-prometheus.py` to capture `drcio_hp_weight`/`drcio_lp_weight` metrics for plotting.
+
+### Step 5: Cleanup
+```bash
+cd infrastructure
+./cleanup.sh
+```
+
+### Need Help?
+Open an issue or email nithin@example.com with logs (attach `scripts/.pf-logs/*` and relevant `kubectl describe` output). Common issues: missing EBS CSI IAM policy, stale kubeconfig context, or Grafana PVC not re-created.
