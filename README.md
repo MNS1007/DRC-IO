@@ -31,17 +31,17 @@ If Docker isn’t available, install kubectl ≥1.28, awscli ≥2.10, Helm ≥3.
 ./scripts/run-scenario2.sh             # Scenario 2 (No DRC-IO)
 ./scripts/run-scenario3.sh             # Scenario 3 (With DRC-IO)
 ```
-Running them individually guarantees a clean slate for each step and mirrors how we captured the report figures. If you want the bundled experience, run `./scripts/run-experiments.sh` after each scenario succeeds once. Results appear under `experiment-results-YYYYMMDD-HHMMSS/`. One complete directory is already checked in for reference.
+Running them individually guarantees a clean slate for each step and mirrors how we captured the report figures. Results appear under `experiment-results-YYYYMMDD-HHMMSS/`. One complete directory is already checked in for reference.
 
 ### D. Troubleshooting
-- If `run-experiments.sh` complains about monitoring or volumes, rerun:
+- If `run-scenariox.sh` complains about monitoring or volumes, rerun:
   ```bash
   ./infrastructure/fix-ebs-csi.sh
   helm upgrade --install prometheus prometheus-community/kube-prometheus-stack     -n monitoring -f kubernetes/monitoring/prometheus-values.yaml --wait --timeout 15m
   ```
   This repairs the AWS EBS CSI driver and rebinds the Grafana/Prom PVCs. Contact me if you still see `CREATE_FAILED` after that; it likely means the IAM role was rotated.
 - If Docker image pulls fail, use the host tooling path above.
-**Heads up:** the entire setup was compressed to keep grading simple; occasionally the scripts may still fail (usually due to AWS credentials or EBS CSI driver resets). If anything refuses to run after following the steps above, email nithin@example.com with the console output and we will fix it immediately.
+**Heads up:** the entire setup was compressed to keep grading simple; occasionally the scripts may still fail (usually due to AWS credentials or EBS CSI driver resets). If anything refuses to run after following the steps above, email nithin10@umd.edu with the console output and we will fix it immediately.
 
 - A fresh `experiment-results-20251212-214354/` directory is checked in with the exact CSV/metrics/logs we captured right before submission so you can cross-verify the plots.
 - CloudWatch access: include the comment `# IAM User: nithin10 (arn:aws:iam::320658617028:user/nithin10)` when grading; it unlocks `/aws/eks/drcio-demo/workloads` logs and Container Insights dashboards.
@@ -53,7 +53,7 @@ Running them individually guarantees a clean slate for each step and mirrors how
   (Contact: nithin10@umd.edu for any credential issues.)
 
 ### E. Capturing DRC-IO io.weight plot (Fig. 6)
-1. After `./scripts/run-experiments.sh` completes, keep Scenario 3 data (or rerun `./scripts/run-scenario3.sh`).
+1. After `./scripts/run-scenario3.sh` completes, keep Scenario 3 data .
 2. Run `./scripts/port-forward-monitoring.sh` and open Grafana → *DRC-IO Overview* → panel `DRC-IO Controller: IO Weight` to view HP (blue) vs LP (orange) weights as in Fig. 6.
 3. For raw data, execute:
    ```bash
@@ -112,4 +112,4 @@ cd infrastructure
 ```
 
 ### Need Help?
-Open an issue or email nithin@example.com with logs (attach `scripts/.pf-logs/*` and relevant `kubectl describe` output). Common issues: missing EBS CSI IAM policy, stale kubeconfig context, or Grafana PVC not re-created.
+Open an issue or email nithin10@umd.edu with logs (attach `scripts/.pf-logs/*` and relevant `kubectl describe` output). Common issues: missing EBS CSI IAM policy, stale kubeconfig context, or Grafana PVC not re-created.
