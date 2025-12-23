@@ -4,7 +4,9 @@
 
 
 ## 1. TA Quick-Start (Cluster Pre-Provisioned)
-The EKS cluster, HP/LP workloads, DRC-IO controller, and monitoring stack are already running. You only need to verify access and run the experiments—no extra installs beyond Docker/kubectl/aws CLI.
+We routinely shut down the shared EKS environment with `infrastructure/cleanup.sh` to avoid idle AWS costs. If the pre-provisioned cluster is offline when you try the steps below, simply re-run `infrastructure/setup.sh` (or ask us to bring it back up) before executing the scenarios.
+
+When the cluster is up, the EKS control plane, HP/LP workloads, DRC-IO controller, and monitoring stack are already running. You only need to verify access and run the experiments—no extra installs beyond Docker/kubectl/aws CLI.
 
 ### A. Access Credentials & IAM
 - Use the kubeconfig + IAM user shared with the submission. If you hit auth failures, ping me (nithin@example.com) and mention the error—most issues are credential expiry or AWS EBS CSI driver reinstallation.
@@ -110,6 +112,7 @@ To recreate the io.weight chart from Scenario 3, follow the same Grafana steps a
 cd infrastructure
 ./cleanup.sh
 ```
+`cleanup.sh` tears down the EKS cluster, node groups, IAM roles, and monitoring stack. Run it whenever you finish testing so we don’t leave AWS resources running indefinitely; re-run `setup.sh` to recreate everything for the next test cycle.
 
 ### Need Help?
 Open an issue or email nithin@example.com with logs (attach `scripts/.pf-logs/*` and relevant `kubectl describe` output). Common issues: missing EBS CSI IAM policy, stale kubeconfig context, or Grafana PVC not re-created.
